@@ -70,7 +70,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper function to parse pricing discount depth
+# Helper function to parse pricing discount depth for browser display and CSV export
 def parse_price_discounts(text):
     if not isinstance(text, str) or pd.isna(text):
         return []
@@ -111,8 +111,15 @@ def parse_price_discounts(text):
                 "discount_pct": discount_pct,
                 "raw_line": line_clean
             })
-        elif not found:
-            parsed_items.append({"raw_line": line_clean})
+        else:
+            parsed_items.append({
+                "product": line_clean,
+                "old_price": None,
+                "new_price": None,
+                "discount_amount": None,
+                "discount_pct": None,
+                "raw_line": line_clean
+            })
             
     return parsed_items
 
@@ -160,7 +167,6 @@ if not valid_dates.empty:
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
     
-    # Label cleaned up (removed "Submissions Window:")
     date_range = st.sidebar.date_input(
         "Select Date Range",
         value=(min_date, max_date),
@@ -232,7 +238,7 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
-# --- 5. BOLD TAB HEADERS (Store Reports Segregation Header Removed) ---
+# --- 5. BOLD TAB HEADERS ---
 tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
 
 all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
@@ -243,11 +249,13 @@ with tab_comp:
     comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
     
     if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
-        # Strictly exempt outlets that answered 'No' to competitor activities
         comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
         
         if not comp_df.empty:
             comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
+            
+            # Prepare Export Rows with Depth Analysis
+            export_rows = []
             
             with comp_summary_col1:
                 st.markdown("##### Detailed Competitor Price Cuts & Depth Analysis")
@@ -257,6 +265,32 @@ with tab_comp:
                     activity = row.get(desc_col, "No description provided.")
                     timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
 
+                    parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
+                    
+                    # Populate CSV Export Data
+                    if parsed_discounts:
+                        for item in parsed_discounts:
+                            export_rows.append({
+                                "Date": timestamp_str,
+                                "Outlet": outlet,
+                                "Field Rep": rep,
+                                "Activity": item["product"],
+                                "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
+                                "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
+                                "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A"
+                            })
+                    else:
+                        export_rows.append({
+                            "Date": timestamp_str,
+                            "Outlet": outlet,
+                            "Field Rep": rep,
+                            "Activity": "Competitor activity confirmed (no notes entered).",
+                            "Was": "N/A",
+                            "Now": "N/A",
+                            "Depth": "N/A"
+                        })
+
+                    # Render UI Cards
                     with st.container():
                         header_col1, header_col2 = st.columns([3, 1])
                         with header_col1:
@@ -264,13 +298,10 @@ with tab_comp:
                         with header_col2:
                             st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
                         
-                        # Price Depth Parsing
-                        if pd.notna(activity) and str(activity).strip().lower() != "nan":
-                            parsed_discounts = parse_price_discounts(str(activity))
-                            
+                        if parsed_discounts:
                             st.markdown("**Reported Pricing / Activities:**")
                             for item in parsed_discounts:
-                                if "discount_amount" in item:
+                                if item.get("discount_amount"):
                                     st.markdown(
                                         f"- **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
                                         f"<span style='text-decoration: line-through; color: #888;'>from KSh {item['old_price']:.0f}</span> "
@@ -282,7 +313,7 @@ with tab_comp:
                         else:
                             st.info("Competitor activity confirmed (no text notes entered).")
                         
-                        # Only show Competitor photos here
+                        # Render Competitor Images
                         comp_images = []
                         for img_col in comp_image_cols:
                             img_val = row.get(img_col)
@@ -310,19 +341,15 @@ with tab_comp:
                     
             with comp_summary_col2:
                 st.markdown("##### Export Options")
-                st.info("Export competitor activity logs directly to CSV.")
+                st.info("Export structured price cuts and depth analysis directly to CSV.")
                 
-                export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col, 'Formatted_Timestamp']].rename(columns={
-                    'Type Outlet Name': 'Outlet',
-                    'Select Your Name': 'Field Rep',
-                    desc_col: 'Competitor Activity Details',
-                    'Formatted_Timestamp': 'Timestamp'
-                })
+                export_df = pd.DataFrame(export_rows)
                 csv_data = export_df.to_csv(index=False).encode('utf-8')
+                
                 st.download_button(
-                    label="📥 Download Competitor Summary (CSV)",
+                    label="📥 Download Depth Report (CSV)",
                     data=csv_data,
-                    file_name="Competitor_Activity_Report.csv",
+                    file_name="Competitor_Price_Depth_Report.csv",
                     mime="text/csv",
                 )
         else:
@@ -334,10 +361,8 @@ with tab_paid:
     paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
     
     if paid_col in filtered_df.columns:
-        # Strictly exempt outlets that answered 'No' to paid assets or have empty asset data
         paid_df = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
         
-        # Exclude outlets where asset text is blank/NaN
         if asset_select_col in paid_df.columns:
             paid_df = paid_df[paid_df[asset_select_col].notna() & (paid_df[asset_select_col].astype(str).str.strip() != "")]
         
@@ -357,7 +382,6 @@ with tab_paid:
                     
                     st.markdown(f"**Asset Types Executed:** `{assets}`")
                     
-                    # Only show Paid Asset photos here
                     paid_images = []
                     for img_col in paid_image_cols:
                         img_val = row.get(img_col)
