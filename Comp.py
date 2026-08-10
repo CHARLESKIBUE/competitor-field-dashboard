@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling for Dashboard UI & Cards
+# Custom CSS for UI styling
 st.markdown("""
     <style>
     div[data-testid="stSidebar"] {
@@ -29,17 +29,7 @@ st.markdown("""
         margin-bottom: 16px;
         border-radius: 8px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.06);
-        border-top: 1px solid #f1f3f5;
-        border-right: 1px solid #f1f3f5;
-        border-bottom: 1px solid #f1f3f5;
-    }
-    .card-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-bottom: 1px solid #eee;
-        padding-bottom: 8px;
-        margin-bottom: 10px;
+        border: 1px solid #f1f3f5;
     }
     .timestamp-badge {
         background-color: #eef2f7;
@@ -53,7 +43,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Load & Parse Data Function
+# 2. Robust Date Parsing Function
 @st.cache_data(ttl=300)
 def load_data():
     CSV_URL = "https://docs.google.com/spreadsheets/d/1OoAeqfCO4k-9zm75_FsAT0PSDySqD_GR8RGfdIxjgTA/export?format=csv&gid=102621635"
@@ -61,18 +51,30 @@ def load_data():
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
     
-    # Identify date/timestamp column
-    date_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower() or "submission" in c.lower()]
-    if date_cols:
-        target_date_col = date_cols[0]
+    # Precise Date/Time column detection (ignoring Submission IDs)
+    target_date_col = None
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if ("date" in col_lower or "time" in col_lower or "timestamp" in col_lower) and "id" not in col_lower:
+            target_date_col = col
+            break
+            
+    if target_date_col:
+        # Parse datetime strictly
         df['Parsed_Date'] = pd.to_datetime(df[target_date_col], errors='coerce')
+        # Filter out invalid or crazy dates (like year > 2030 or year < 2020)
+        valid_dates_mask = (df['Parsed_Date'].dt.year >= 2020) & (df['Parsed_Date'].dt.year <= 2030)
+        df.loc[~valid_dates_mask, 'Parsed_Date'] = pd.NaT
+        
         df['Formatted_Timestamp'] = df['Parsed_Date'].dt.strftime('%d %b %Y, %H:%M')
-        # Sort so latest entries are at the top
-        df = df.sort_values(by='Parsed_Date', ascending=False).reset_index(drop=True)
+        df['Formatted_Timestamp'] = df['Formatted_Timestamp'].fillna("Recent Entry")
+        
+        # Sort latest entries first
+        df = df.sort_values(by='Parsed_Date', ascending=False, na_position='last').reset_index(drop=True)
     else:
         df = df.iloc[::-1].reset_index(drop=True)
         df['Parsed_Date'] = None
-        df['Formatted_Timestamp'] = "Latest Entry"
+        df['Formatted_Timestamp'] = "Recent Entry"
         
     return df
 
@@ -82,12 +84,12 @@ except Exception as e:
     st.error("Failed to load live data. Ensure your Google Sheet is accessible.")
     st.stop()
 
-# --- 3. SIDEBAR FILTERS (RENAMED TO "📅 Date") ---
+# --- 3. SIDEBAR FILTERS ---
 st.sidebar.title("📅 Date")
 
-# Date Picker Filter
-if df['Parsed_Date'].notna().any():
-    valid_dates = df['Parsed_Date'].dropna()
+# Date Range Filter
+valid_dates = df['Parsed_Date'].dropna() if 'Parsed_Date' in df.columns else pd.Series()
+if not valid_dates.empty:
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
     
@@ -103,9 +105,9 @@ else:
 
 st.sidebar.divider()
 
-# Button Slicers for Project & Rep
 filtered_df = df.copy()
 
+# Project Filter Button
 if 'Select Your Project' in df.columns:
     project_list = ["All"] + sorted(df['Select Your Project'].dropna().unique().tolist())
     st.sidebar.markdown("### 📂 Project")
@@ -117,6 +119,7 @@ if 'Select Your Project' in df.columns:
     if selected_project_button and selected_project_button != "All":
         filtered_df = filtered_df[filtered_df['Select Your Project'] == selected_project_button]
 
+# Field Rep Filter Button
 if 'Select Your Name' in df.columns:
     rep_list = ["All"] + sorted(df['Select Your Name'].dropna().unique().tolist())
     st.sidebar.markdown("### 👤 Field Rep")
@@ -136,8 +139,8 @@ if 'Type Outlet Name' in df.columns:
     if selected_outlets:
         filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
 
-# Apply Date Filter logic
-if date_range and isinstance(date_range, tuple) and len(date_range) == 2 and filtered_df['Parsed_Date'].notna().any():
+# Apply Date Filter
+if date_range and isinstance(date_range, tuple) and len(date_range) == 2 and not valid_dates.empty:
     start_date, end_date = date_range
     filtered_df = filtered_df[
         (filtered_df['Parsed_Date'].dt.date >= start_date) & 
@@ -166,12 +169,12 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
-# --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL (WITH TIMESTAMPS & IMAGES) ---
+# --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL ---
 st.markdown("### 🚨 Live Competitor Activities Summary")
 st.write("Real-time pricing adjustments, promotions, and Brand Ambassador activations.")
 
 desc_col = "Describe the competitor activities"
-image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
+all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
 
 if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
     comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
@@ -188,25 +191,21 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                 if pd.isna(activity) or str(activity).strip().lower() == "nan":
                     activity = "Competitor activity confirmed (no notes entered)."
                     
-                timestamp_str = row.get('Formatted_Timestamp', 'Recent Submission')
-                if pd.isna(timestamp_str):
-                    timestamp_str = "Recent Submission"
+                timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
 
-                # Container Card
+                # Store Container Card
                 with st.container():
-                    # Top line with Outlet, Rep, and Timestamp on the far right
                     header_col1, header_col2 = st.columns([3, 1])
                     with header_col1:
                         st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
                     with header_col2:
                         st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
                     
-                    # Description
                     st.markdown(f"<div style='margin-top: 4px; margin-bottom: 12px; font-size: 14px; color: #34495e; white-space: pre-line;'>{activity}</div>", unsafe_allow_html=True)
                     
-                    # Render attached photos for this specific entry directly inside the report
+                    # Render attached photos inside store report card
                     attached_images = []
-                    for img_col in image_columns:
+                    for img_col in all_image_columns:
                         img_val = row.get(img_col)
                         if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
                             urls = str(img_val).split(",")
@@ -290,16 +289,34 @@ else:
 
 st.divider()
 
-# --- 7. FIELD IMAGES GALLERY ---
-st.markdown("### 📸 Field Gallery by Category")
-st.write("Browse photos by specific asset/activity categories.")
+# --- 7. FIELD GALLERY WITH IMAGE TYPE TOGGLE BUTTONS ---
+st.markdown("### 📸 Authenticated Field Gallery")
+st.write("Toggle between Paid Asset photos and Competitor Activity photos below.")
 
-if image_columns:
-    selected_img_col = st.selectbox("Select Photo Category:", image_columns)
+# Filter columns into Paid Asset vs Competitor Activity categories
+paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
+comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
+
+# Button Distinguisher Slicer
+image_type_choice = st.segmented_control(
+    "Select Photo Type:",
+    options=["All Images", "Paid Assets", "Competitor Activities"],
+    default="All Images"
+)
+
+if image_type_choice == "Paid Assets":
+    active_image_cols = paid_image_cols
+elif image_type_choice == "Competitor Activities":
+    active_image_cols = comp_image_cols
+else:
+    active_image_cols = all_image_columns
+
+if active_image_cols:
+    selected_img_col = st.selectbox("Select Specific Category Column:", active_image_cols)
     df_images = filtered_df.dropna(subset=[selected_img_col])
 
     if df_images.empty:
-        st.info("No images submitted for this category.")
+        st.info("No images submitted for this category under current filters.")
     else:
         cols = st.columns(4)
         col_index = 0 
@@ -307,6 +324,7 @@ if image_columns:
         for _, row in df_images.iterrows():
             img_url_raw = row[selected_img_col]
             outlet_name = row.get("Type Outlet Name", "Unknown Outlet")
+            timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
             
             if pd.notna(img_url_raw) and str(img_url_raw).strip() != "" and str(img_url_raw).strip().lower() != "nan":
                 first_url = str(img_url_raw).split(",")[0].strip()
@@ -319,6 +337,7 @@ if image_columns:
 
                 with cols[col_index % 4]:
                     st.markdown(f"**{outlet_name}**")
+                    st.caption(f"⏱️ {timestamp_str}")
                     html_code = f'''
                         <a href="{auth_url}" target="_blank">
                             <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #ced4da;">
@@ -330,4 +349,4 @@ if image_columns:
                 
                 col_index += 1
 else:
-    st.info("No image columns detected in dataset.")
+    st.info("No image columns match the selected photo type.")
