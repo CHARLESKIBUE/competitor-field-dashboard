@@ -11,10 +11,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling for Dashboard UI & Slicers
+# Custom CSS for UI styling
 st.markdown("""
     <style>
-    /* Styled Sidebar Filters */
     div[data-testid="stSidebar"] {
         background-color: #f8f9fa;
         padding-top: 15px;
@@ -23,32 +22,40 @@ st.markdown("""
         font-weight: 600 !important;
         color: #2c3e50 !important;
     }
-    /* Summary Cards */
-    .metric-box {
-        background-color: #ffffff;
-        border-radius: 10px;
-        padding: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        border: 1px solid #e9ecef;
-    }
     .comp-card {
-        background-color: #fdfdfe;
+        background-color: #ffffff;
         border-left: 4px solid #e74c3c;
-        padding: 12px 16px;
+        padding: 14px 18px;
         margin-bottom: 12px;
-        border-radius: 4px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        border-top: 1px solid #f1f3f5;
+        border-right: 1px solid #f1f3f5;
+        border-bottom: 1px solid #f1f3f5;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Load Data Function
+# 2. Load & Parse Data Function
 @st.cache_data(ttl=300)
 def load_data():
     CSV_URL = "https://docs.google.com/spreadsheets/d/1OoAeqfCO4k-9zm75_FsAT0PSDySqD_GR8RGfdIxjgTA/export?format=csv&gid=102621635"
     df = pd.read_csv(CSV_URL)
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
+    
+    # Try parsing date column if present (e.g., Submission Date or Timestamp)
+    date_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower()]
+    if date_cols:
+        target_date_col = date_cols[0]
+        df['Parsed_Date'] = pd.to_datetime(df[target_date_col], errors='coerce')
+        # Sort so latest entries are at the top
+        df = df.sort_values(by='Parsed_Date', ascending=False).reset_index(drop=True)
+    else:
+        # If no explicit date column, reverse index order to put newest entries at the top
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['Parsed_Date'] = None
+        
     return df
 
 try:
@@ -57,46 +64,74 @@ except Exception as e:
     st.error("Failed to load live data. Ensure your Google Sheet is accessible.")
     st.stop()
 
-# --- 3. PRESENTABLE SIDEBAR SLICERS ---
+# --- 3. SIDEBAR FILTERS (BUTTON SLICERS & DATE PICKER) ---
 st.sidebar.title("🎛️ Report Slicers")
-st.sidebar.markdown("Filter live operational metrics by region or outlet.")
 
-# Project Filter
-if 'Select Your Project' in df.columns:
-    project_list = sorted(df['Select Your Project'].dropna().unique().tolist())
-    selected_projects = st.sidebar.multiselect("Select Project:", project_list, default=project_list)
+# Date Selector Filter
+if df['Parsed_Date'].notna().any():
+    min_date = df['Parsed_Date'].min().date()
+    max_date = df['Parsed_Date'].max().date()
+    
+    st.sidebar.markdown("### 📅 Date Range")
+    date_range = st.sidebar.date_input(
+        "Select Submissions Window:",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
 else:
-    selected_projects = []
-
-# Field Rep Filter
-if 'Select Your Name' in df.columns:
-    rep_list = sorted(df['Select Your Name'].dropna().unique().tolist())
-    selected_reps = st.sidebar.multiselect("Field Representative:", rep_list, default=rep_list)
-else:
-    selected_reps = []
-
-# Outlet Filter
-if 'Type Outlet Name' in df.columns:
-    outlet_list = sorted(df['Type Outlet Name'].dropna().unique().tolist())
-    selected_outlets = st.sidebar.multiselect("Outlet Name:", outlet_list, default=outlet_list)
-else:
-    selected_outlets = []
-
-# Apply Slicers
-filtered_df = df.copy()
-if selected_projects:
-    filtered_df = filtered_df[filtered_df['Select Your Project'].isin(selected_projects)]
-if selected_reps:
-    filtered_df = filtered_df[filtered_df['Select Your Name'].isin(selected_reps)]
-if selected_outlets:
-    filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
+    date_range = None
 
 st.sidebar.divider()
-st.sidebar.caption("Data syncs automatically with Google Sheets every 5 minutes.")
+
+# Button Slicer for Project Selection
+filtered_df = df.copy()
+
+if 'Select Your Project' in df.columns:
+    project_list = ["All"] + sorted(df['Select Your Project'].dropna().unique().tolist())
+    st.sidebar.markdown("### 📂 Project")
+    selected_project_button = st.sidebar.segmented_control(
+        "Filter by Project:",
+        options=project_list,
+        default="All"
+    )
+    if selected_project_button and selected_project_button != "All":
+        filtered_df = filtered_df[filtered_df['Select Your Project'] == selected_project_button]
+
+# Button Slicer for Field Representative Selection
+if 'Select Your Name' in df.columns:
+    rep_list = ["All"] + sorted(df['Select Your Name'].dropna().unique().tolist())
+    st.sidebar.markdown("### 👤 Field Rep")
+    selected_rep_button = st.sidebar.segmented_control(
+        "Filter by Representative:",
+        options=rep_list,
+        default="All"
+    )
+    if selected_rep_button and selected_rep_button != "All":
+        filtered_df = filtered_df[filtered_df['Select Your Name'] == selected_rep_button]
+
+# Dropdown Multi-Select for Outlets
+if 'Type Outlet Name' in df.columns:
+    st.sidebar.markdown("### 🏬 Outlets")
+    outlet_list = sorted(filtered_df['Type Outlet Name'].dropna().unique().tolist())
+    selected_outlets = st.sidebar.multiselect("Filter Outlets:", outlet_list, default=outlet_list)
+    if selected_outlets:
+        filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
+
+# Apply Date Filter if selected
+if date_range and len(date_range) == 2 and filtered_df['Parsed_Date'].notna().any():
+    start_date, end_date = date_range
+    filtered_df = filtered_df[
+        (filtered_df['Parsed_Date'].dt.date >= start_date) & 
+        (filtered_df['Parsed_Date'].dt.date <= end_date)
+    ]
+
+st.sidebar.divider()
+st.sidebar.caption("⚡ Live sync enabled (Google Sheets / Jotform API)")
 
 # --- DASHBOARD HEADER ---
 st.title("📊 Weekly Field Dashboard: Paid Assets & Competitor Intelligence")
-st.markdown("Live operational updates from field representatives across retail outlets.")
+st.markdown("Real-time operational field updates sorted chronologically (newest first).")
 
 # --- 4. HIGH-LEVEL METRICS ---
 total_submissions = len(filtered_df)
@@ -114,8 +149,8 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 st.divider()
 
 # --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL ---
-st.markdown("### 🚨 Live Competitor Activities Summary")
-st.write("Real-time pricing adjustments, promotions, and Brand Ambassador activations reported from stores.")
+st.markdown("### 🚨 Live Competitor Activities Summary (Latest Entries First)")
+st.write("Real-time pricing adjustments, promotions, and Brand Ambassador activations.")
 
 desc_col = "Describe the competitor activities"
 if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
@@ -130,20 +165,20 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                 outlet = row.get("Type Outlet Name", "Unknown Outlet")
                 rep = row.get("Select Your Name", "Unknown Rep")
                 activity = row.get(desc_col, "No description provided.")
+                date_str = f" | {row['Parsed_Date'].strftime('%d %b %Y')}" if pd.notna(row.get('Parsed_Date')) else ""
                 
                 st.markdown(f"""
                 <div class="comp-card">
                     <strong style="color: #2c3e50; font-size: 16px;">📍 {outlet}</strong> 
-                    <span style="font-size: 12px; color: #7f8c8d;"> (Rep: {rep})</span><br>
+                    <span style="font-size: 12px; color: #7f8c8d;"> (Rep: {rep}{date_str})</span><br>
                     <div style="margin-top: 6px; font-size: 14px; color: #34495e; white-space: pre-line;">{activity}</div>
                 </div>
                 """, unsafe_allow_html=True)
                 
         with comp_summary_col2:
-            st.markdown("##### Export Options")
-            st.info("Download the structured competitor activity logs for client distribution.")
+            st.markdown("##### Export Report")
+            st.info("Export filtered competitor activity logs directly to CSV.")
             
-            # Export CSV Button
             export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col]].rename(columns={
                 'Type Outlet Name': 'Outlet',
                 'Select Your Name': 'Field Rep',
@@ -152,7 +187,7 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
             csv_data = export_df.to_csv(index=False).encode('utf-8')
             
             st.download_button(
-                label="📥 Download Competitor Summary (CSV)",
+                label="📥 Download Summary (CSV)",
                 data=csv_data,
                 file_name="Competitor_Activity_Report.csv",
                 mime="text/csv",
@@ -189,9 +224,9 @@ else:
 
 st.divider()
 
-# --- 7. FIELD IMAGES VIEW BOX ---
+# --- 7. FIELD IMAGES VIEW GALLERY ---
 st.markdown("### 📸 Authenticated Field Gallery")
-st.write("Select a category to review field asset executions and competitor activations.")
+st.write("Browse field images chronologically across categories.")
 
 image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
 
