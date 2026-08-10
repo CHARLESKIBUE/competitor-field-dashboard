@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import re
 
 # --- JOTFORM API KEY ---
 JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
@@ -11,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for UI styling
+# Custom Styling
 st.markdown("""
     <style>
     div[data-testid="stSidebar"] {
@@ -31,6 +32,15 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.06);
         border: 1px solid #f1f3f5;
     }
+    .paid-card {
+        background-color: #ffffff;
+        border-left: 4px solid #2ecc71;
+        padding: 16px 20px;
+        margin-bottom: 16px;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.06);
+        border: 1px solid #f1f3f5;
+    }
     .timestamp-badge {
         background-color: #eef2f7;
         color: #475569;
@@ -40,21 +50,84 @@ st.markdown("""
         border-radius: 12px;
         border: 1px solid #cbd5e1;
     }
+    .discount-badge {
+        background-color: #fee2e2;
+        color: #991b1b;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 6px;
+        border: 1px solid #fca5a5;
+        margin-left: 6px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Parse Data Function using exact "Submission Date" Column & CSV Export URL
+# Helper function to parse depth of pricing discounts
+def parse_price_discounts(text):
+    if not isinstance(text, str) or pd.isna(text):
+        return []
+    
+    # Matches patterns like:
+    # 1. @299 from 455
+    # 2. was 565 now 456
+    # 3. selling @319 from 426
+    # 4. 479 now 379
+    patterns = [
+        r"(.*?)(?:@|now\s*|selling\s*@\s*)(\d+)\s*(?:from|was)\s*(\d+)",
+        r"(.*?)(?:was\s*)(\d+)\s*(?:now\s*|@\s*)(\d+)"
+    ]
+    
+    parsed_items = []
+    lines = text.split('\n')
+    
+    for line in lines:
+        line_clean = line.strip('-* ').strip()
+        if not line_clean:
+            continue
+            
+        found = False
+        # Pattern 1: @NEW from OLD
+        match1 = re.search(r"(.+?)(?:@|now\s*)\s*(\d+)\s*(?:from|was)\s*(\d+)", line_clean, re.IGNORECASE)
+        if match1:
+            product = match1.group(1).strip()
+            new_price = float(match1.group(2))
+            old_price = float(match1.group(3))
+            found = True
+        else:
+            # Pattern 2: was OLD now NEW
+            match2 = re.search(r"(.+?)(?:was\s*)\s*(\d+)\s*(?:now\s*|@\s*)\s*(\d+)", line_clean, re.IGNORECASE)
+            if match2:
+                product = match2.group(1).strip()
+                old_price = float(match2.group(2))
+                new_price = float(match2.group(3))
+                found = True
+                
+        if found and old_price > new_price:
+            discount_amount = old_price - new_price
+            discount_pct = (discount_amount / old_price) * 100
+            parsed_items.append({
+                "product": product,
+                "old_price": old_price,
+                "new_price": new_price,
+                "discount_amount": discount_amount,
+                "discount_pct": discount_pct,
+                "raw_line": line_clean
+            })
+        elif not found:
+            parsed_items.append({"raw_line": line_clean})
+            
+    return parsed_items
+
+# 2. Load Data Function
 @st.cache_data(ttl=300)
 def load_data():
-    # Correct CSV export link format for Google Sheets
     CSV_URL = "https://docs.google.com/spreadsheets/d/1XeWdaYVyLdqfgF00nKBOjZ0OlhtcqRHb6HO0b1lND0Y/export?format=csv&gid=284416453"
     df = pd.read_csv(CSV_URL)
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
     
-    # Target exact "Submission Date" column
     date_col = "Submission Date" if "Submission Date" in df.columns else None
-    
     if not date_col:
         for c in df.columns:
             if "submission date" in c.lower() or ("date" in c.lower() and "id" not in c.lower()):
@@ -63,14 +136,11 @@ def load_data():
 
     if date_col:
         df['Parsed_Date'] = pd.to_datetime(df[date_col], errors='coerce')
-        # Filter out invalid dates
         valid_dates_mask = (df['Parsed_Date'].dt.year >= 2020) & (df['Parsed_Date'].dt.year <= 2030)
         df.loc[~valid_dates_mask, 'Parsed_Date'] = pd.NaT
         
         df['Formatted_Timestamp'] = df['Parsed_Date'].dt.strftime('%d %b %Y, %H:%M')
         df['Formatted_Timestamp'] = df['Formatted_Timestamp'].fillna("Recent Entry")
-        
-        # Sort latest entries first
         df = df.sort_values(by='Parsed_Date', ascending=False, na_position='last').reset_index(drop=True)
     else:
         df = df.iloc[::-1].reset_index(drop=True)
@@ -88,7 +158,6 @@ except Exception as e:
 # --- 3. SIDEBAR FILTERS ---
 st.sidebar.title("📅 Date")
 
-# Date Range Filter
 valid_dates = df['Parsed_Date'].dropna() if 'Parsed_Date' in df.columns else pd.Series()
 if not valid_dates.empty:
     min_date = valid_dates.min().date()
@@ -108,7 +177,6 @@ st.sidebar.divider()
 
 filtered_df = df.copy()
 
-# Project Filter Button
 if 'Select Your Project' in df.columns:
     project_list = ["All"] + sorted(df['Select Your Project'].dropna().unique().tolist())
     st.sidebar.markdown("### 📂 Project")
@@ -120,7 +188,6 @@ if 'Select Your Project' in df.columns:
     if selected_project_button and selected_project_button != "All":
         filtered_df = filtered_df[filtered_df['Select Your Project'] == selected_project_button]
 
-# Field Rep Filter Button
 if 'Select Your Name' in df.columns:
     rep_list = ["All"] + sorted(df['Select Your Name'].dropna().unique().tolist())
     st.sidebar.markdown("### 👤 Field Rep")
@@ -132,7 +199,6 @@ if 'Select Your Name' in df.columns:
     if selected_rep_button and selected_rep_button != "All":
         filtered_df = filtered_df[filtered_df['Select Your Name'] == selected_rep_button]
 
-# Dropdown Multi-Select for Outlets
 if 'Type Outlet Name' in df.columns:
     st.sidebar.markdown("### 🏬 Outlets")
     outlet_list = sorted(filtered_df['Type Outlet Name'].dropna().unique().tolist())
@@ -140,7 +206,6 @@ if 'Type Outlet Name' in df.columns:
     if selected_outlets:
         filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
 
-# Apply Date Filter
 if date_range and isinstance(date_range, tuple) and len(date_range) == 2 and not valid_dates.empty:
     start_date, end_date = date_range
     filtered_df = filtered_df[
@@ -170,31 +235,118 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
-# --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL ---
-st.markdown("### 🚨 Live Competitor Activities Summary")
-st.write("Real-time pricing adjustments, promotions, and Brand Ambassador activations.")
+# --- 5. SEGREGATED REPORT TABS (PAID ASSETS VS COMPETITOR ACTIVITY) ---
+st.markdown("### 🏬 Store Reports Segregation")
 
-desc_col = "Describe the competitor activities"
+tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
+
 all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
 
-if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
-    comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
+# --- TAB 1: COMPETITOR ACTIVITY & DISCOUNT DEPTH ---
+with tab_comp:
+    desc_col = "Describe the competitor activities"
+    comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
     
-    if not comp_df.empty:
-        comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
+    if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
+        comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
         
-        with comp_summary_col1:
-            st.markdown("##### Detailed Store Reports")
-            for _, row in comp_df.iterrows():
+        if not comp_df.empty:
+            comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
+            
+            with comp_summary_col1:
+                st.markdown("##### Detailed Competitor Price Cuts & Depth Analysis")
+                for _, row in comp_df.iterrows():
+                    outlet = row.get("Type Outlet Name", "Unknown Outlet")
+                    rep = row.get("Select Your Name", "Unknown Rep")
+                    activity = row.get(desc_col, "No description provided.")
+                    timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
+
+                    with st.container():
+                        header_col1, header_col2 = st.columns([3, 1])
+                        with header_col1:
+                            st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
+                        with header_col2:
+                            st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
+                        
+                        # Price Depth Parsing
+                        if pd.notna(activity) and str(activity).strip().lower() != "nan":
+                            parsed_discounts = parse_price_discounts(str(activity))
+                            
+                            st.markdown("**Reported Pricing / Activities:**")
+                            for item in parsed_discounts:
+                                if "discount_amount" in item:
+                                    st.markdown(
+                                        f"- **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
+                                        f"<span style='text-decoration: line-through; color: #888;'>from KSh {item['old_price']:.0f}</span> "
+                                        f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span>", 
+                                        unsafe_allow_html=True
+                                    )
+                                else:
+                                    st.markdown(f"- {item['raw_line']}")
+                        else:
+                            st.info("Competitor activity confirmed (no text notes entered).")
+                        
+                        # Only show Competitor photos here
+                        comp_images = []
+                        for img_col in comp_image_cols:
+                            img_val = row.get(img_col)
+                            if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                                for u in str(img_val).split(","):
+                                    if u.strip():
+                                        title = str(img_col).replace("Take Photo of competitor activites", "Competitor Activity").strip()
+                                        comp_images.append((title, u.strip()))
+                        
+                        if comp_images:
+                            st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                            img_cols = st.columns(min(len(comp_images), 4))
+                            for idx, (img_title, raw_url) in enumerate(comp_images):
+                                auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
+                                with img_cols[idx % 4]:
+                                    st.markdown(f'''
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="font-size: 11px; font-weight: 600; color: #e74c3c;">{img_title}</span>
+                                            <a href="{auth_url}" target="_blank">
+                                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #fca5a5; margin-top: 2px;">
+                                            </a>
+                                        </div>
+                                    ''', unsafe_allow_html=True)
+                        st.divider()
+                    
+            with comp_summary_col2:
+                st.markdown("##### Export Options")
+                st.info("Export competitor activity logs directly to CSV.")
+                
+                export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col, 'Formatted_Timestamp']].rename(columns={
+                    'Type Outlet Name': 'Outlet',
+                    'Select Your Name': 'Field Rep',
+                    desc_col: 'Competitor Activity Details',
+                    'Formatted_Timestamp': 'Timestamp'
+                })
+                csv_data = export_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Competitor Summary (CSV)",
+                    data=csv_data,
+                    file_name="Competitor_Activity_Report.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.info("No competitor activities reported for the selected filters.")
+
+# --- TAB 2: PAID ASSET EXECUTIONS ---
+with tab_paid:
+    asset_select_col = "Select Paid assets in the outlet"
+    paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
+    
+    if paid_col in filtered_df.columns:
+        paid_df = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
+        
+        if not paid_df.empty:
+            for _, row in paid_df.iterrows():
                 outlet = row.get("Type Outlet Name", "Unknown Outlet")
                 rep = row.get("Select Your Name", "Unknown Rep")
-                activity = row.get(desc_col, "No description provided.")
-                if pd.isna(activity) or str(activity).strip().lower() == "nan":
-                    activity = "Competitor activity confirmed (no notes entered)."
-                    
+                assets = row.get(asset_select_col, "Paid asset confirmed.")
                 timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
 
-                # Store Container Card
                 with st.container():
                     header_col1, header_col2 = st.columns([3, 1])
                     with header_col1:
@@ -202,75 +354,42 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                     with header_col2:
                         st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
                     
-                    st.markdown(f"<div style='margin-top: 4px; margin-bottom: 12px; font-size: 14px; color: #34495e; white-space: pre-line;'>{activity}</div>", unsafe_allow_html=True)
+                    st.markdown(f"**Asset Types Executed:** `{assets}`")
                     
-                    # Render attached photos inside store report card
-                    attached_images = []
-                    for img_col in all_image_columns:
+                    # Only show Paid Asset photos here
+                    paid_images = []
+                    for img_col in paid_image_cols:
                         img_val = row.get(img_col)
                         if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
-                            urls = str(img_val).split(",")
-                            for u in urls:
-                                u_clean = u.strip()
-                                if u_clean:
-                                    clean_title = str(img_col).replace("Take Photo of competitor activites", "Competitor Activity")\
-                                                              .replace("Take Photo of paid assets", "Paid Asset")\
-                                                              .replace("(", "").replace(")", "").strip()
-                                    attached_images.append((clean_title, u_clean))
+                            for u in str(img_val).split(","):
+                                if u.strip():
+                                    title = str(img_col).replace("Take Photo of paid assets", "Paid Asset").replace("(", "").replace(")", "").strip()
+                                    paid_images.append((title, u.strip()))
                     
-                    if attached_images:
-                        img_cols = st.columns(min(len(attached_images), 4))
-                        for idx, (img_title, raw_url) in enumerate(attached_images):
-                            if "jotform.com" in raw_url:
-                                separator = "&" if "?" in raw_url else "?"
-                                auth_url = f"{raw_url}{separator}apiKey={JOTFORM_API_KEY}"
-                            else:
-                                auth_url = raw_url
-
+                    if paid_images:
+                        st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                        img_cols = st.columns(min(len(paid_images), 4))
+                        for idx, (img_title, raw_url) in enumerate(paid_images):
+                            auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
                             with img_cols[idx % 4]:
-                                html_code = f'''
+                                st.markdown(f'''
                                     <div style="margin-bottom: 8px;">
-                                        <span style="font-size: 11px; font-weight: 600; color: #64748b;">{img_title}</span>
+                                        <span style="font-size: 11px; font-weight: 600; color: #2ecc71;">{img_title}</span>
                                         <a href="{auth_url}" target="_blank">
-                                            <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
+                                            <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #86efac; margin-top: 2px;">
                                         </a>
                                     </div>
-                                '''
-                                st.markdown(html_code, unsafe_allow_html=True)
-                    
+                                ''', unsafe_allow_html=True)
                     st.divider()
-                
-        with comp_summary_col2:
-            st.markdown("##### Export Options")
-            st.info("Export filtered competitor activity logs directly to CSV.")
-            
-            export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col, 'Formatted_Timestamp']].rename(columns={
-                'Type Outlet Name': 'Outlet',
-                'Select Your Name': 'Field Rep',
-                desc_col: 'Competitor Activity Details',
-                'Formatted_Timestamp': 'Timestamp'
-            })
-            csv_data = export_df.to_csv(index=False).encode('utf-8')
-            
-            st.download_button(
-                label="📥 Download Summary (CSV)",
-                data=csv_data,
-                file_name="Competitor_Activity_Report.csv",
-                mime="text/csv",
-            )
-    else:
-        st.info("No competitor activities reported for the selected filters.")
-else:
-    st.info("Competitor activity columns are missing from dataset.")
+        else:
+            st.info("No paid assets reported for the selected filters.")
 
 st.divider()
 
-# --- 6. TYPES OF PAID ASSETS PANEL ---
-st.markdown("### 📦 Paid Asset Distribution")
-asset_col = "Select Paid assets in the outlet"
-
-if asset_col in filtered_df.columns:
-    assets_series = filtered_df[asset_col].dropna().astype(str)
+# --- 6. TYPES OF PAID ASSETS CHARTS ---
+st.markdown("### 📦 Paid Asset Distribution Breakdown")
+if asset_select_col in filtered_df.columns:
+    assets_series = filtered_df[asset_select_col].dropna().astype(str)
     assets_exploded = assets_series.str.split(",").explode().str.strip()
     assets_exploded = assets_exploded[assets_exploded != ""]
 
@@ -285,19 +404,11 @@ if asset_col in filtered_df.columns:
             st.dataframe(asset_counts, hide_index=True, width='stretch')
     else:
         st.info("No paid assets recorded for the selected filters.")
-else:
-    st.info("Paid assets column missing from dataset.")
 
 st.divider()
 
-# --- 7. FIELD GALLERY WITH IMAGE TYPE TOGGLE BUTTONS ---
+# --- 7. FIELD GALLERY BY CATEGORY ---
 st.markdown("### 📸 Authenticated Field Gallery")
-st.write("Toggle between Paid Asset photos and Competitor Activity photos below.")
-
-paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
-comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
-
-# Button Distinguisher Slicer
 image_type_choice = st.segmented_control(
     "Select Photo Type:",
     options=["All Images", "Paid Assets", "Competitor Activities"],
@@ -305,14 +416,14 @@ image_type_choice = st.segmented_control(
 )
 
 if image_type_choice == "Paid Assets":
-    active_image_cols = paid_image_cols
+    active_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
 elif image_type_choice == "Competitor Activities":
-    active_image_cols = comp_image_cols
+    active_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
 else:
     active_image_cols = all_image_columns
 
 if active_image_cols:
-    selected_img_col = st.selectbox("Select Specific Category Column:", active_image_cols)
+    selected_img_col = st.selectbox("Select Category Column:", active_image_cols)
     df_images = filtered_df.dropna(subset=[selected_img_col])
 
     if df_images.empty:
@@ -328,25 +439,16 @@ if active_image_cols:
             
             if pd.notna(img_url_raw) and str(img_url_raw).strip() != "" and str(img_url_raw).strip().lower() != "nan":
                 first_url = str(img_url_raw).split(",")[0].strip()
-                
-                if "jotform.com" in first_url:
-                    separator = "&" if "?" in first_url else "?"
-                    auth_url = f"{first_url}{separator}apiKey={JOTFORM_API_KEY}"
-                else:
-                    auth_url = first_url
+                auth_url = f"{first_url}{'&' if '?' in first_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in first_url else first_url
 
                 with cols[col_index % 4]:
                     st.markdown(f"**{outlet_name}**")
                     st.caption(f"⏱️ {timestamp_str}")
-                    html_code = f'''
+                    st.markdown(f'''
                         <a href="{auth_url}" target="_blank">
                             <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #ced4da;">
                         </a>
                         <br>
                         <a href="{auth_url}" target="_blank" style="font-size: 12px; text-decoration: none; color: #0d6efd;">🔗 View Original</a>
-                    '''
-                    st.markdown(html_code, unsafe_allow_html=True)
-                
+                    ''', unsafe_allow_html=True)
                 col_index += 1
-else:
-    st.info("No image columns match the selected photo type.")
