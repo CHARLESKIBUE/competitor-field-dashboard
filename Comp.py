@@ -119,68 +119,63 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     # 1. Competitor Activities Sheet
     ws_comp = wb.active
     ws_comp.title = "Competitor Depth & Activity"
-    comp_headers = ["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Embedded Image"]
-    ws_comp.append(comp_headers)
+    ws_comp.append(["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Embedded Image"])
     
     for row_idx, item in enumerate(comp_rows, start=2):
         ws_comp.append([
             item["Date"], item["Outlet"], item["Field Rep"], 
             item["Activity"], item["Was"], item["Now"], item["Depth"], ""
         ])
-        ws_comp.row_dimensions[row_idx].height = 65  # Make row tall enough for photo
+        ws_comp.row_dimensions[row_idx].height = 60
         
-        # Download and embed image thumbnail if available
         if item.get("image_url"):
             try:
                 url = item["image_url"]
                 auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
                 headers = {"User-Agent": "Mozilla/5.0"}
-                res = requests.get(auth_url, headers=headers, timeout=5)
+                res = requests.get(auth_url, headers=headers, timeout=3)
                 
                 if res.status_code == 200:
                     img = Image.open(BytesIO(res.content))
-                    img.thumbnail((80, 80)) # Resize to fit cell cleanly
+                    img.thumbnail((75, 75))
                     img_bytes = BytesIO()
                     img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
-                    
                     xl_img = OpenPyxlImage(img_bytes)
                     ws_comp.add_image(xl_img, f"H{row_idx}")
             except Exception:
-                ws_comp.cell(row=row_idx, column=8, value="[Image Load Failed]")
+                ws_comp.cell(row=row_idx, column=8, value="[Image Unavailable]")
 
     ws_comp.column_dimensions['H'].width = 15
 
     # 2. Paid Assets Sheet
     ws_paid = wb.create_sheet(title="Paid Asset Executions")
-    paid_headers = ["Date", "Outlet", "Field Rep", "Paid Assets Executed", "Embedded Image"]
-    ws_paid.append(paid_headers)
+    ws_paid.append(["Date", "Outlet", "Field Rep", "Paid Assets Executed", "Embedded Image"])
     
     for row_idx, item in enumerate(paid_rows, start=2):
         ws_paid.append([
             item["Date"], item["Outlet"], item["Field Rep"], 
             item["Paid Assets Executed"], ""
         ])
-        ws_paid.row_dimensions[row_idx].height = 65
+        ws_paid.row_dimensions[row_idx].height = 60
         
         if item.get("image_url"):
             try:
                 url = item["image_url"]
                 auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
                 headers = {"User-Agent": "Mozilla/5.0"}
-                res = requests.get(auth_url, headers=headers, timeout=5)
+                res = requests.get(auth_url, headers=headers, timeout=3)
                 
                 if res.status_code == 200:
                     img = Image.open(BytesIO(res.content))
-                    img.thumbnail((80, 80))
+                    img.thumbnail((75, 75))
                     img_bytes = BytesIO()
                     img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
-                    
                     xl_img = OpenPyxlImage(img_bytes)
                     ws_paid.add_image(xl_img, f"E{row_idx}")
             except Exception:
-                ws_paid.cell(row=row_idx, column=5, value="[Image Load Failed]")
+                ws_paid.cell(row=row_idx, column=5, value="[Image Unavailable]")
 
     ws_paid.column_dimensions['E'].width = 15
 
@@ -310,20 +305,73 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
+# --- PRE-PROCESS EXPORT ROWS ---
+all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
+comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
+paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
+desc_col = "Describe the competitor activities"
+asset_select_col = "Select Paid assets in the outlet"
+
+global_comp_rows = []
+if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
+    comp_df_export = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
+    for _, row in comp_df_export.iterrows():
+        outlet = row.get("Type Outlet Name", "Unknown Outlet")
+        rep = row.get("Select Your Name", "Unknown Rep")
+        activity = row.get(desc_col, "No description provided.")
+        timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
+        parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
+        
+        first_img = None
+        for img_col in comp_image_cols:
+            img_val = row.get(img_col)
+            if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                first_img = str(img_val).split(",")[0].strip()
+                break
+
+        if parsed_discounts:
+            for item in parsed_discounts:
+                global_comp_rows.append({
+                    "Date": timestamp_str, "Outlet": outlet, "Field Rep": rep,
+                    "Activity": item["product"],
+                    "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
+                    "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
+                    "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A",
+                    "image_url": first_img
+                })
+        else:
+            global_comp_rows.append({
+                "Date": timestamp_str, "Outlet": outlet, "Field Rep": rep,
+                "Activity": "Competitor activity confirmed (no notes entered).",
+                "Was": "N/A", "Now": "N/A", "Depth": "N/A", "image_url": first_img
+            })
+
+global_paid_rows = []
+if paid_col in filtered_df.columns and asset_select_col in filtered_df.columns:
+    paid_df_export = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
+    for _, row in paid_df_export.iterrows():
+        outlet = row.get("Type Outlet Name", "Unknown Outlet")
+        rep = row.get("Select Your Name", "Unknown Rep")
+        assets = row.get(asset_select_col, "Paid asset confirmed.")
+        timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
+        
+        first_img = None
+        for img_col in paid_image_cols:
+            img_val = row.get(img_col)
+            if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                first_img = str(img_val).split(",")[0].strip()
+                break
+
+        global_paid_rows.append({
+            "Date": timestamp_str, "Outlet": outlet, "Field Rep": rep,
+            "Paid Assets Executed": assets, "image_url": first_img
+        })
+
 # --- 5. BOLD TAB HEADERS ---
 tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
 
-all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
-
-# Accumulator lists for Excel generation
-global_comp_rows = []
-global_paid_rows = []
-
-# --- TAB 1: COMPETITOR ACTIVITY & DISCOUNT DEPTH ---
+# --- TAB 1: COMPETITOR ACTIVITY ---
 with tab_comp:
-    desc_col = "Describe the competitor activities"
-    comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
-    
     if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
         comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
         
@@ -337,42 +385,8 @@ with tab_comp:
                     rep = row.get("Select Your Name", "Unknown Rep")
                     activity = row.get(desc_col, "No description provided.")
                     timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
-
                     parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
-                    
-                    # Get primary image URL for Excel embedding
-                    first_comp_img = None
-                    for img_col in comp_image_cols:
-                        img_val = row.get(img_col)
-                        if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
-                            first_comp_img = str(img_val).split(",")[0].strip()
-                            break
 
-                    if parsed_discounts:
-                        for item in parsed_discounts:
-                            global_comp_rows.append({
-                                "Date": timestamp_str,
-                                "Outlet": outlet,
-                                "Field Rep": rep,
-                                "Activity": item["product"],
-                                "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
-                                "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
-                                "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A",
-                                "image_url": first_comp_img
-                            })
-                    else:
-                        global_comp_rows.append({
-                            "Date": timestamp_str,
-                            "Outlet": outlet,
-                            "Field Rep": rep,
-                            "Activity": "Competitor activity confirmed (no notes entered).",
-                            "Was": "N/A",
-                            "Now": "N/A",
-                            "Depth": "N/A",
-                            "image_url": first_comp_img
-                        })
-
-                    # Render UI Cards
                     with st.container():
                         header_col1, header_col2 = st.columns([3, 1])
                         with header_col1:
@@ -421,29 +435,25 @@ with tab_comp:
                         st.divider()
                     
             with comp_summary_col2:
-                st.markdown("##### 📥 Export Complete Excel Package")
-                st.info("Downloads an `.xlsx` file containing multi-tab sheets with thumbnail images embedded inside cells.")
+                st.markdown("##### 📥 Export Package")
+                st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
                 
-                # Generate Excel Package
-                excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
-                
-                st.download_button(
-                    label="📊 Download Excel Workbook (With Embedded Images)",
-                    data=excel_bytes,
-                    file_name="Competitor_And_Paid_Assets_Report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                if st.button("🔄 Generate Excel Package"):
+                    with st.spinner("Compiling images and building Excel sheets..."):
+                        excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
+                        st.download_button(
+                            label="📊 Download Excel Workbook (.xlsx)",
+                            data=excel_bytes,
+                            file_name="Competitor_And_Paid_Assets_Report.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
         else:
             st.info("No competitor activities reported for the selected filters.")
 
-# --- TAB 2: PAID ASSET EXECUTIONS ---
+# --- TAB 2: PAID ASSETS ---
 with tab_paid:
-    asset_select_col = "Select Paid assets in the outlet"
-    paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
-    
     if paid_col in filtered_df.columns:
         paid_df = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
-        
         if asset_select_col in paid_df.columns:
             paid_df = paid_df[paid_df[asset_select_col].notna() & (paid_df[asset_select_col].astype(str).str.strip() != "")]
         
@@ -456,21 +466,6 @@ with tab_paid:
                     rep = row.get("Select Your Name", "Unknown Rep")
                     assets = row.get(asset_select_col, "Paid asset confirmed.")
                     timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
-
-                    first_paid_img = None
-                    for img_col in paid_image_cols:
-                        img_val = row.get(img_col)
-                        if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
-                            first_paid_img = str(img_val).split(",")[0].strip()
-                            break
-
-                    global_paid_rows.append({
-                        "Date": timestamp_str,
-                        "Outlet": outlet,
-                        "Field Rep": rep,
-                        "Paid Assets Executed": assets,
-                        "image_url": first_paid_img
-                    })
 
                     with st.container():
                         header_col1, header_col2 = st.columns([3, 1])
@@ -507,17 +502,18 @@ with tab_paid:
                         st.divider()
 
             with paid_col_right:
-                st.markdown("##### 📥 Export Complete Excel Package")
-                st.info("Downloads an `.xlsx` file containing multi-tab sheets with thumbnail images embedded inside cells.")
+                st.markdown("##### 📥 Export Package")
+                st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
                 
-                excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
-                
-                st.download_button(
-                    label="📊 Download Excel Workbook (With Embedded Images)",
-                    data=excel_bytes,
-                    file_name="Competitor_And_Paid_Assets_Report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                if st.button("🔄 Generate Excel Package", key="paid_excel_btn"):
+                    with st.spinner("Compiling images and building Excel sheets..."):
+                        excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
+                        st.download_button(
+                            label="📊 Download Excel Workbook (.xlsx)",
+                            data=excel_bytes,
+                            file_name="Competitor_And_Paid_Assets_Report.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
         else:
             st.info("No outlets with paid assets reported for the selected filters.")
 
