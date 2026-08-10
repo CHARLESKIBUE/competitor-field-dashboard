@@ -15,6 +15,7 @@ st.set_page_config(
 # Custom Styling
 st.markdown("""
     <style>
+    /* Styled Sidebar */
     div[data-testid="stSidebar"] {
         background-color: #f8f9fa;
         padding-top: 15px;
@@ -23,18 +24,24 @@ st.markdown("""
         font-weight: 600 !important;
         color: #2c3e50 !important;
     }
+    
+    /* Prominent, Bold, Custom Styled Tabs */
+    button[data-baseweb="tab"] {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        color: #1e293b !important;
+        padding: 10px 20px !important;
+        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #e74c3c !important;
+        border-bottom-color: #e74c3c !important;
+    }
+
+    /* Cards Styling */
     .comp-card {
         background-color: #ffffff;
         border-left: 4px solid #e74c3c;
-        padding: 16px 20px;
-        margin-bottom: 16px;
-        border-radius: 8px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.06);
-        border: 1px solid #f1f3f5;
-    }
-    .paid-card {
-        background-color: #ffffff;
-        border-left: 4px solid #2ecc71;
         padding: 16px 20px;
         margin-bottom: 16px;
         border-radius: 8px;
@@ -63,20 +70,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper function to parse depth of pricing discounts
+# Helper function to parse pricing discount depth
 def parse_price_discounts(text):
     if not isinstance(text, str) or pd.isna(text):
         return []
-    
-    # Matches patterns like:
-    # 1. @299 from 455
-    # 2. was 565 now 456
-    # 3. selling @319 from 426
-    # 4. 479 now 379
-    patterns = [
-        r"(.*?)(?:@|now\s*|selling\s*@\s*)(\d+)\s*(?:from|was)\s*(\d+)",
-        r"(.*?)(?:was\s*)(\d+)\s*(?:now\s*|@\s*)(\d+)"
-    ]
     
     parsed_items = []
     lines = text.split('\n')
@@ -87,7 +84,7 @@ def parse_price_discounts(text):
             continue
             
         found = False
-        # Pattern 1: @NEW from OLD
+        # Pattern 1: @NEW from OLD or now NEW from OLD
         match1 = re.search(r"(.+?)(?:@|now\s*)\s*(\d+)\s*(?:from|was)\s*(\d+)", line_clean, re.IGNORECASE)
         if match1:
             product = match1.group(1).strip()
@@ -163,9 +160,9 @@ if not valid_dates.empty:
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
     
-    st.sidebar.markdown("### Select Date Range")
+    # Label cleaned up (removed "Submissions Window:")
     date_range = st.sidebar.date_input(
-        "Submissions Window:",
+        "Select Date Range",
         value=(min_date, max_date),
         min_value=min_date,
         max_value=max_date
@@ -235,9 +232,7 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
-# --- 5. SEGREGATED REPORT TABS (PAID ASSETS VS COMPETITOR ACTIVITY) ---
-st.markdown("### 🏬 Store Reports Segregation")
-
+# --- 5. BOLD TAB HEADERS (Store Reports Segregation Header Removed) ---
 tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
 
 all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
@@ -248,6 +243,7 @@ with tab_comp:
     comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
     
     if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
+        # Strictly exempt outlets that answered 'No' to competitor activities
         comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
         
         if not comp_df.empty:
@@ -338,7 +334,12 @@ with tab_paid:
     paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
     
     if paid_col in filtered_df.columns:
+        # Strictly exempt outlets that answered 'No' to paid assets or have empty asset data
         paid_df = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
+        
+        # Exclude outlets where asset text is blank/NaN
+        if asset_select_col in paid_df.columns:
+            paid_df = paid_df[paid_df[asset_select_col].notna() & (paid_df[asset_select_col].astype(str).str.strip() != "")]
         
         if not paid_df.empty:
             for _, row in paid_df.iterrows():
@@ -382,7 +383,7 @@ with tab_paid:
                                 ''', unsafe_allow_html=True)
                     st.divider()
         else:
-            st.info("No paid assets reported for the selected filters.")
+            st.info("No outlets with paid assets reported for the selected filters.")
 
 st.divider()
 
