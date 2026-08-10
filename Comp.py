@@ -6,12 +6,12 @@ JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
 
 # 1. Page Configuration
 st.set_page_config(
-    page_title="Executive Field & Competitor Dashboard", 
+    page_title="Competitor Activities and Paid Assets", 
     layout="wide", 
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for UI styling
+# Custom Styling for Dashboard UI & Cards
 st.markdown("""
     <style>
     div[data-testid="stSidebar"] {
@@ -25,13 +25,30 @@ st.markdown("""
     .comp-card {
         background-color: #ffffff;
         border-left: 4px solid #e74c3c;
-        padding: 14px 18px;
-        margin-bottom: 12px;
-        border-radius: 6px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        padding: 16px 20px;
+        margin-bottom: 16px;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.06);
         border-top: 1px solid #f1f3f5;
         border-right: 1px solid #f1f3f5;
         border-bottom: 1px solid #f1f3f5;
+    }
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 8px;
+        margin-bottom: 10px;
+    }
+    .timestamp-badge {
+        background-color: #eef2f7;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 12px;
+        border: 1px solid #cbd5e1;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -44,17 +61,18 @@ def load_data():
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
     
-    # Try parsing date column if present (e.g., Submission Date or Timestamp)
-    date_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower()]
+    # Identify date/timestamp column
+    date_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower() or "submission" in c.lower()]
     if date_cols:
         target_date_col = date_cols[0]
         df['Parsed_Date'] = pd.to_datetime(df[target_date_col], errors='coerce')
+        df['Formatted_Timestamp'] = df['Parsed_Date'].dt.strftime('%d %b %Y, %H:%M')
         # Sort so latest entries are at the top
         df = df.sort_values(by='Parsed_Date', ascending=False).reset_index(drop=True)
     else:
-        # If no explicit date column, reverse index order to put newest entries at the top
         df = df.iloc[::-1].reset_index(drop=True)
         df['Parsed_Date'] = None
+        df['Formatted_Timestamp'] = "Latest Entry"
         
     return df
 
@@ -64,17 +82,18 @@ except Exception as e:
     st.error("Failed to load live data. Ensure your Google Sheet is accessible.")
     st.stop()
 
-# --- 3. SIDEBAR FILTERS (BUTTON SLICERS & DATE PICKER) ---
-st.sidebar.title("🎛️ Report Slicers")
+# --- 3. SIDEBAR FILTERS (RENAMED TO "📅 Date") ---
+st.sidebar.title("📅 Date")
 
-# Date Selector Filter
+# Date Picker Filter
 if df['Parsed_Date'].notna().any():
-    min_date = df['Parsed_Date'].min().date()
-    max_date = df['Parsed_Date'].max().date()
+    valid_dates = df['Parsed_Date'].dropna()
+    min_date = valid_dates.min().date()
+    max_date = valid_dates.max().date()
     
-    st.sidebar.markdown("### 📅 Date Range")
+    st.sidebar.markdown("### Select Date Range")
     date_range = st.sidebar.date_input(
-        "Select Submissions Window:",
+        "Submissions Window:",
         value=(min_date, max_date),
         min_value=min_date,
         max_value=max_date
@@ -84,7 +103,7 @@ else:
 
 st.sidebar.divider()
 
-# Button Slicer for Project Selection
+# Button Slicers for Project & Rep
 filtered_df = df.copy()
 
 if 'Select Your Project' in df.columns:
@@ -98,7 +117,6 @@ if 'Select Your Project' in df.columns:
     if selected_project_button and selected_project_button != "All":
         filtered_df = filtered_df[filtered_df['Select Your Project'] == selected_project_button]
 
-# Button Slicer for Field Representative Selection
 if 'Select Your Name' in df.columns:
     rep_list = ["All"] + sorted(df['Select Your Name'].dropna().unique().tolist())
     st.sidebar.markdown("### 👤 Field Rep")
@@ -118,8 +136,8 @@ if 'Type Outlet Name' in df.columns:
     if selected_outlets:
         filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
 
-# Apply Date Filter if selected
-if date_range and len(date_range) == 2 and filtered_df['Parsed_Date'].notna().any():
+# Apply Date Filter logic
+if date_range and isinstance(date_range, tuple) and len(date_range) == 2 and filtered_df['Parsed_Date'].notna().any():
     start_date, end_date = date_range
     filtered_df = filtered_df[
         (filtered_df['Parsed_Date'].dt.date >= start_date) & 
@@ -127,11 +145,11 @@ if date_range and len(date_range) == 2 and filtered_df['Parsed_Date'].notna().an
     ]
 
 st.sidebar.divider()
-st.sidebar.caption("⚡ Live sync enabled (Google Sheets / Jotform API)")
+st.sidebar.caption("⚡ Live sync active (Google Sheets & Jotform API)")
 
 # --- DASHBOARD HEADER ---
-st.title("📊 Weekly Field Dashboard: Paid Assets & Competitor Intelligence")
-st.markdown("Real-time operational field updates sorted chronologically (newest first).")
+st.title("📊 Competitor Activities and Paid Assets")
+st.markdown("Real-time operational field reports sorted chronologically (latest entries first).")
 
 # --- 4. HIGH-LEVEL METRICS ---
 total_submissions = len(filtered_df)
@@ -148,16 +166,18 @@ col3.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
-# --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL ---
-st.markdown("### 🚨 Live Competitor Activities Summary (Latest Entries First)")
+# --- 5. COMPETITOR INTELLIGENCE SUMMARY PANEL (WITH TIMESTAMPS & IMAGES) ---
+st.markdown("### 🚨 Live Competitor Activities Summary")
 st.write("Real-time pricing adjustments, promotions, and Brand Ambassador activations.")
 
 desc_col = "Describe the competitor activities"
+image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
+
 if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
     comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
     
     if not comp_df.empty:
-        comp_summary_col1, comp_summary_col2 = st.columns([2, 1])
+        comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
         
         with comp_summary_col1:
             st.markdown("##### Detailed Store Reports")
@@ -165,24 +185,70 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                 outlet = row.get("Type Outlet Name", "Unknown Outlet")
                 rep = row.get("Select Your Name", "Unknown Rep")
                 activity = row.get(desc_col, "No description provided.")
-                date_str = f" | {row['Parsed_Date'].strftime('%d %b %Y')}" if pd.notna(row.get('Parsed_Date')) else ""
-                
-                st.markdown(f"""
-                <div class="comp-card">
-                    <strong style="color: #2c3e50; font-size: 16px;">📍 {outlet}</strong> 
-                    <span style="font-size: 12px; color: #7f8c8d;"> (Rep: {rep}{date_str})</span><br>
-                    <div style="margin-top: 6px; font-size: 14px; color: #34495e; white-space: pre-line;">{activity}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                if pd.isna(activity) or str(activity).strip().lower() == "nan":
+                    activity = "Competitor activity confirmed (no notes entered)."
+                    
+                timestamp_str = row.get('Formatted_Timestamp', 'Recent Submission')
+                if pd.isna(timestamp_str):
+                    timestamp_str = "Recent Submission"
+
+                # Container Card
+                with st.container():
+                    # Top line with Outlet, Rep, and Timestamp on the far right
+                    header_col1, header_col2 = st.columns([3, 1])
+                    with header_col1:
+                        st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
+                    with header_col2:
+                        st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
+                    
+                    # Description
+                    st.markdown(f"<div style='margin-top: 4px; margin-bottom: 12px; font-size: 14px; color: #34495e; white-space: pre-line;'>{activity}</div>", unsafe_allow_html=True)
+                    
+                    # Render attached photos for this specific entry directly inside the report
+                    attached_images = []
+                    for img_col in image_columns:
+                        img_val = row.get(img_col)
+                        if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                            urls = str(img_val).split(",")
+                            for u in urls:
+                                u_clean = u.strip()
+                                if u_clean:
+                                    clean_title = str(img_col).replace("Take Photo of competitor activites", "Competitor Activity")\
+                                                              .replace("Take Photo of paid assets", "Paid Asset")\
+                                                              .replace("(", "").replace(")", "").strip()
+                                    attached_images.append((clean_title, u_clean))
+                    
+                    if attached_images:
+                        img_cols = st.columns(min(len(attached_images), 4))
+                        for idx, (img_title, raw_url) in enumerate(attached_images):
+                            if "jotform.com" in raw_url:
+                                separator = "&" if "?" in raw_url else "?"
+                                auth_url = f"{raw_url}{separator}apiKey={JOTFORM_API_KEY}"
+                            else:
+                                auth_url = raw_url
+
+                            with img_cols[idx % 4]:
+                                html_code = f'''
+                                    <div style="margin-bottom: 8px;">
+                                        <span style="font-size: 11px; font-weight: 600; color: #64748b;">{img_title}</span>
+                                        <a href="{auth_url}" target="_blank">
+                                            <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
+                                        </a>
+                                    </div>
+                                '''
+                                st.markdown(html_code, unsafe_allow_html=True)
+                    
+                    st.divider()
                 
         with comp_summary_col2:
-            st.markdown("##### Export Report")
+            st.markdown("##### Export Options")
             st.info("Export filtered competitor activity logs directly to CSV.")
             
-            export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col]].rename(columns={
+            export_df = comp_df[['Type Outlet Name', 'Select Your Name', desc_col, 'Formatted_Timestamp']].rename(columns={
                 'Type Outlet Name': 'Outlet',
                 'Select Your Name': 'Field Rep',
-                desc_col: 'Competitor Activity Details'
+                desc_col: 'Competitor Activity Details',
+                'Formatted_Timestamp': 'Timestamp'
             })
             csv_data = export_df.to_csv(index=False).encode('utf-8')
             
@@ -195,7 +261,7 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
     else:
         st.info("No competitor activities reported for the selected filters.")
 else:
-    st.info("Competitor activity columns are missing from the dataset.")
+    st.info("Competitor activity columns are missing from dataset.")
 
 st.divider()
 
@@ -224,11 +290,9 @@ else:
 
 st.divider()
 
-# --- 7. FIELD IMAGES VIEW GALLERY ---
-st.markdown("### 📸 Authenticated Field Gallery")
-st.write("Browse field images chronologically across categories.")
-
-image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
+# --- 7. FIELD IMAGES GALLERY ---
+st.markdown("### 📸 Field Gallery by Category")
+st.write("Browse photos by specific asset/activity categories.")
 
 if image_columns:
     selected_img_col = st.selectbox("Select Photo Category:", image_columns)
@@ -244,10 +308,9 @@ if image_columns:
             img_url_raw = row[selected_img_col]
             outlet_name = row.get("Type Outlet Name", "Unknown Outlet")
             
-            if pd.notna(img_url_raw) and str(img_url_raw).strip() != "":
+            if pd.notna(img_url_raw) and str(img_url_raw).strip() != "" and str(img_url_raw).strip().lower() != "nan":
                 first_url = str(img_url_raw).split(",")[0].strip()
                 
-                # Append Jotform API Key
                 if "jotform.com" in first_url:
                     separator = "&" if "?" in first_url else "?"
                     auth_url = f"{first_url}{separator}apiKey={JOTFORM_API_KEY}"
