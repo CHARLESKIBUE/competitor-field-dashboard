@@ -46,7 +46,7 @@ st.markdown("""
 # 2. Robust Date Parsing Function
 @st.cache_data(ttl=300)
 def load_data():
-    CSV_URL = "https://docs.google.com/spreadsheets/d/1OoAeqfCO4k-9zm75_FsAT0PSDySqD_GR8RGfdIxjgTA/export?format=csv&gid=102621635"
+    CSV_URL = "https://docs.google.com/spreadsheets/d/1XeWdaYVyLdqfgF00nKBOjZ0OlhtcqRHb6HO0b1lND0Y/edit?usp=sharing"
     df = pd.read_csv(CSV_URL)
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
