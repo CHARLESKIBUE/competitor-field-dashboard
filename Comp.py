@@ -1,6 +1,11 @@
 import pandas as pd
 import streamlit as st
+import requests
 import re
+from io import BytesIO
+from PIL import Image
+import openpyxl
+from openpyxl.drawing.image import Image as OpenPyxlImage
 
 # --- JOTFORM API KEY ---
 JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
@@ -15,7 +20,6 @@ st.set_page_config(
 # Custom Styling
 st.markdown("""
     <style>
-    /* Styled Sidebar */
     div[data-testid="stSidebar"] {
         background-color: #f8f9fa;
         padding-top: 15px;
@@ -24,8 +28,6 @@ st.markdown("""
         font-weight: 600 !important;
         color: #2c3e50 !important;
     }
-    
-    /* Prominent, Bold, Custom Styled Tabs */
     button[data-baseweb="tab"] {
         font-size: 18px !important;
         font-weight: 800 !important;
@@ -36,17 +38,6 @@ st.markdown("""
     button[data-baseweb="tab"][aria-selected="true"] {
         color: #e74c3c !important;
         border-bottom-color: #e74c3c !important;
-    }
-
-    /* Cards Styling */
-    .comp-card {
-        background-color: #ffffff;
-        border-left: 4px solid #e74c3c;
-        padding: 16px 20px;
-        margin-bottom: 16px;
-        border-radius: 8px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.06);
-        border: 1px solid #f1f3f5;
     }
     .timestamp-badge {
         background-color: #eef2f7;
@@ -70,7 +61,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper function to parse pricing discount depth for browser display and CSV export
+# Helper function to parse pricing discount depth
 def parse_price_discounts(text):
     if not isinstance(text, str) or pd.isna(text):
         return []
@@ -84,7 +75,6 @@ def parse_price_discounts(text):
             continue
             
         found = False
-        # Pattern 1: @NEW from OLD or now NEW from OLD
         match1 = re.search(r"(.+?)(?:@|now\s*)\s*(\d+)\s*(?:from|was)\s*(\d+)", line_clean, re.IGNORECASE)
         if match1:
             product = match1.group(1).strip()
@@ -92,7 +82,6 @@ def parse_price_discounts(text):
             old_price = float(match1.group(3))
             found = True
         else:
-            # Pattern 2: was OLD now NEW
             match2 = re.search(r"(.+?)(?:was\s*)\s*(\d+)\s*(?:now\s*|@\s*)\s*(\d+)", line_clean, re.IGNORECASE)
             if match2:
                 product = match2.group(1).strip()
@@ -122,6 +111,89 @@ def parse_price_discounts(text):
             })
             
     return parsed_items
+
+# --- EXCEL IMAGE EMBEDDING GENERATOR ---
+def generate_excel_with_images(comp_rows, paid_rows, raw_df):
+    wb = openpyxl.Workbook()
+    
+    # 1. Competitor Activities Sheet
+    ws_comp = wb.active
+    ws_comp.title = "Competitor Depth & Activity"
+    comp_headers = ["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Embedded Image"]
+    ws_comp.append(comp_headers)
+    
+    for row_idx, item in enumerate(comp_rows, start=2):
+        ws_comp.append([
+            item["Date"], item["Outlet"], item["Field Rep"], 
+            item["Activity"], item["Was"], item["Now"], item["Depth"], ""
+        ])
+        ws_comp.row_dimensions[row_idx].height = 65  # Make row tall enough for photo
+        
+        # Download and embed image thumbnail if available
+        if item.get("image_url"):
+            try:
+                url = item["image_url"]
+                auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
+                headers = {"User-Agent": "Mozilla/5.0"}
+                res = requests.get(auth_url, headers=headers, timeout=5)
+                
+                if res.status_code == 200:
+                    img = Image.open(BytesIO(res.content))
+                    img.thumbnail((80, 80)) # Resize to fit cell cleanly
+                    img_bytes = BytesIO()
+                    img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    xl_img = OpenPyxlImage(img_bytes)
+                    ws_comp.add_image(xl_img, f"H{row_idx}")
+            except Exception:
+                ws_comp.cell(row=row_idx, column=8, value="[Image Load Failed]")
+
+    ws_comp.column_dimensions['H'].width = 15
+
+    # 2. Paid Assets Sheet
+    ws_paid = wb.create_sheet(title="Paid Asset Executions")
+    paid_headers = ["Date", "Outlet", "Field Rep", "Paid Assets Executed", "Embedded Image"]
+    ws_paid.append(paid_headers)
+    
+    for row_idx, item in enumerate(paid_rows, start=2):
+        ws_paid.append([
+            item["Date"], item["Outlet"], item["Field Rep"], 
+            item["Paid Assets Executed"], ""
+        ])
+        ws_paid.row_dimensions[row_idx].height = 65
+        
+        if item.get("image_url"):
+            try:
+                url = item["image_url"]
+                auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
+                headers = {"User-Agent": "Mozilla/5.0"}
+                res = requests.get(auth_url, headers=headers, timeout=5)
+                
+                if res.status_code == 200:
+                    img = Image.open(BytesIO(res.content))
+                    img.thumbnail((80, 80))
+                    img_bytes = BytesIO()
+                    img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    xl_img = OpenPyxlImage(img_bytes)
+                    ws_paid.add_image(xl_img, f"E{row_idx}")
+            except Exception:
+                ws_paid.cell(row=row_idx, column=5, value="[Image Load Failed]")
+
+    ws_paid.column_dimensions['E'].width = 15
+
+    # 3. Raw Data Sheet
+    ws_raw = wb.create_sheet(title="Raw Data")
+    ws_raw.append(list(raw_df.columns))
+    for r in raw_df.itertuples(index=False):
+        ws_raw.append(list(r))
+        
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
 # 2. Load Data Function
 @st.cache_data(ttl=300)
@@ -243,6 +315,10 @@ tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Pa
 
 all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
 
+# Accumulator lists for Excel generation
+global_comp_rows = []
+global_paid_rows = []
+
 # --- TAB 1: COMPETITOR ACTIVITY & DISCOUNT DEPTH ---
 with tab_comp:
     desc_col = "Describe the competitor activities"
@@ -254,9 +330,6 @@ with tab_comp:
         if not comp_df.empty:
             comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
             
-            # Prepare Export Rows with Depth Analysis
-            export_rows = []
-            
             with comp_summary_col1:
                 st.markdown("##### Detailed Competitor Price Cuts & Depth Analysis")
                 for _, row in comp_df.iterrows():
@@ -267,27 +340,36 @@ with tab_comp:
 
                     parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
                     
-                    # Populate CSV Export Data
+                    # Get primary image URL for Excel embedding
+                    first_comp_img = None
+                    for img_col in comp_image_cols:
+                        img_val = row.get(img_col)
+                        if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                            first_comp_img = str(img_val).split(",")[0].strip()
+                            break
+
                     if parsed_discounts:
                         for item in parsed_discounts:
-                            export_rows.append({
+                            global_comp_rows.append({
                                 "Date": timestamp_str,
                                 "Outlet": outlet,
                                 "Field Rep": rep,
                                 "Activity": item["product"],
                                 "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
                                 "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
-                                "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A"
+                                "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A",
+                                "image_url": first_comp_img
                             })
                     else:
-                        export_rows.append({
+                        global_comp_rows.append({
                             "Date": timestamp_str,
                             "Outlet": outlet,
                             "Field Rep": rep,
                             "Activity": "Competitor activity confirmed (no notes entered).",
                             "Was": "N/A",
                             "Now": "N/A",
-                            "Depth": "N/A"
+                            "Depth": "N/A",
+                            "image_url": first_comp_img
                         })
 
                     # Render UI Cards
@@ -313,7 +395,6 @@ with tab_comp:
                         else:
                             st.info("Competitor activity confirmed (no text notes entered).")
                         
-                        # Render Competitor Images
                         comp_images = []
                         for img_col in comp_image_cols:
                             img_val = row.get(img_col)
@@ -340,17 +421,17 @@ with tab_comp:
                         st.divider()
                     
             with comp_summary_col2:
-                st.markdown("##### Export Options")
-                st.info("Export structured price cuts and depth analysis directly to CSV.")
+                st.markdown("##### 📥 Export Complete Excel Package")
+                st.info("Downloads an `.xlsx` file containing multi-tab sheets with thumbnail images embedded inside cells.")
                 
-                export_df = pd.DataFrame(export_rows)
-                csv_data = export_df.to_csv(index=False).encode('utf-8')
+                # Generate Excel Package
+                excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
                 
                 st.download_button(
-                    label="📥 Download Depth Report (CSV)",
-                    data=csv_data,
-                    file_name="Competitor_Price_Depth_Report.csv",
-                    mime="text/csv",
+                    label="📊 Download Excel Workbook (With Embedded Images)",
+                    data=excel_bytes,
+                    file_name="Competitor_And_Paid_Assets_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
         else:
             st.info("No competitor activities reported for the selected filters.")
@@ -367,45 +448,76 @@ with tab_paid:
             paid_df = paid_df[paid_df[asset_select_col].notna() & (paid_df[asset_select_col].astype(str).str.strip() != "")]
         
         if not paid_df.empty:
-            for _, row in paid_df.iterrows():
-                outlet = row.get("Type Outlet Name", "Unknown Outlet")
-                rep = row.get("Select Your Name", "Unknown Rep")
-                assets = row.get(asset_select_col, "Paid asset confirmed.")
-                timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
+            paid_col_left, paid_col_right = st.columns([2.2, 1])
+            
+            with paid_col_left:
+                for _, row in paid_df.iterrows():
+                    outlet = row.get("Type Outlet Name", "Unknown Outlet")
+                    rep = row.get("Select Your Name", "Unknown Rep")
+                    assets = row.get(asset_select_col, "Paid asset confirmed.")
+                    timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
 
-                with st.container():
-                    header_col1, header_col2 = st.columns([3, 1])
-                    with header_col1:
-                        st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
-                    with header_col2:
-                        st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
-                    
-                    st.markdown(f"**Asset Types Executed:** `{assets}`")
-                    
-                    paid_images = []
+                    first_paid_img = None
                     for img_col in paid_image_cols:
                         img_val = row.get(img_col)
                         if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
-                            for u in str(img_val).split(","):
-                                if u.strip():
-                                    title = str(img_col).replace("Take Photo of paid assets", "Paid Asset").replace("(", "").replace(")", "").strip()
-                                    paid_images.append((title, u.strip()))
-                    
-                    if paid_images:
-                        st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
-                        img_cols = st.columns(min(len(paid_images), 4))
-                        for idx, (img_title, raw_url) in enumerate(paid_images):
-                            auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
-                            with img_cols[idx % 4]:
-                                st.markdown(f'''
-                                    <div style="margin-bottom: 8px;">
-                                        <span style="font-size: 11px; font-weight: 600; color: #2ecc71;">{img_title}</span>
-                                        <a href="{auth_url}" target="_blank">
-                                            <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #86efac; margin-top: 2px;">
-                                        </a>
-                                    </div>
-                                ''', unsafe_allow_html=True)
-                    st.divider()
+                            first_paid_img = str(img_val).split(",")[0].strip()
+                            break
+
+                    global_paid_rows.append({
+                        "Date": timestamp_str,
+                        "Outlet": outlet,
+                        "Field Rep": rep,
+                        "Paid Assets Executed": assets,
+                        "image_url": first_paid_img
+                    })
+
+                    with st.container():
+                        header_col1, header_col2 = st.columns([3, 1])
+                        with header_col1:
+                            st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
+                        with header_col2:
+                            st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
+                        
+                        st.markdown(f"**Asset Types Executed:** `{assets}`")
+                        
+                        paid_images = []
+                        for img_col in paid_image_cols:
+                            img_val = row.get(img_col)
+                            if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
+                                for u in str(img_val).split(","):
+                                    if u.strip():
+                                        title = str(img_col).replace("Take Photo of paid assets", "Paid Asset").replace("(", "").replace(")", "").strip()
+                                        paid_images.append((title, u.strip()))
+                        
+                        if paid_images:
+                            st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                            img_cols = st.columns(min(len(paid_images), 4))
+                            for idx, (img_title, raw_url) in enumerate(paid_images):
+                                auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
+                                with img_cols[idx % 4]:
+                                    st.markdown(f'''
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="font-size: 11px; font-weight: 600; color: #2ecc71;">{img_title}</span>
+                                            <a href="{auth_url}" target="_blank">
+                                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #86efac; margin-top: 2px;">
+                                            </a>
+                                        </div>
+                                    ''', unsafe_allow_html=True)
+                        st.divider()
+
+            with paid_col_right:
+                st.markdown("##### 📥 Export Complete Excel Package")
+                st.info("Downloads an `.xlsx` file containing multi-tab sheets with thumbnail images embedded inside cells.")
+                
+                excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
+                
+                st.download_button(
+                    label="📊 Download Excel Workbook (With Embedded Images)",
+                    data=excel_bytes,
+                    file_name="Competitor_And_Paid_Assets_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
         else:
             st.info("No outlets with paid assets reported for the selected filters.")
 
