@@ -367,15 +367,37 @@ if paid_col in filtered_df.columns and asset_select_col in filtered_df.columns:
 
 # --- TOP NAVIGATION TABS ---
 nav_tab1, nav_tab2, nav_tab3 = st.tabs([
+    "📦 Summary", 
     "🚨 Competitor Activities & Paid Assets", 
-    "📦 Paid Asset Executions", 
-    "📸 Authenticated Field Gallery"
+    "📸 Gallery"
 ])
 
 # ==========================================
-# PAGE 1: HOME TAB
+# PAGE 1: SUMMARY
 # ==========================================
 with nav_tab1:
+    st.markdown("### 📦 Paid Asset Distribution Breakdown")
+    if asset_select_col in filtered_df.columns:
+        assets_series = filtered_df[asset_select_col].dropna().astype(str)
+        assets_exploded = assets_series.str.split(",").explode().str.strip()
+        assets_exploded = assets_exploded[assets_exploded != ""]
+
+        if not assets_exploded.empty:
+            asset_counts = assets_exploded.value_counts().reset_index()
+            asset_counts.columns = ["Asset Type", "Count"]
+
+            col_chart, col_data = st.columns([2, 1])
+            with col_chart:
+                st.bar_chart(asset_counts.set_index("Asset Type"))
+            with col_data:
+                st.dataframe(asset_counts, hide_index=True, use_container_width=True)
+        else:
+            st.info("No paid assets recorded for the selected filters.")
+
+# ==========================================
+# PAGE 2: COMPETITOR ACTIVITIES & PAID ASSETS
+# ==========================================
+with nav_tab2:
     tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
 
     # SUB-TAB 1: COMPETITOR ACTIVITY
@@ -528,32 +550,10 @@ with nav_tab1:
                 st.info("No outlets with paid assets reported for the selected filters.")
 
 # ==========================================
-# PAGE 2: PAID ASSETS BREAKDOWN
-# ==========================================
-with nav_tab2:
-    st.markdown("### 📦 Paid Asset Distribution Breakdown")
-    if asset_select_col in filtered_df.columns:
-        assets_series = filtered_df[asset_select_col].dropna().astype(str)
-        assets_exploded = assets_series.str.split(",").explode().str.strip()
-        assets_exploded = assets_exploded[assets_exploded != ""]
-
-        if not assets_exploded.empty:
-            asset_counts = assets_exploded.value_counts().reset_index()
-            asset_counts.columns = ["Asset Type", "Count"]
-
-            col_chart, col_data = st.columns([2, 1])
-            with col_chart:
-                st.bar_chart(asset_counts.set_index("Asset Type"))
-            with col_data:
-                st.dataframe(asset_counts, hide_index=True, use_container_width=True)
-        else:
-            st.info("No paid assets recorded for the selected filters.")
-
-# ==========================================
-# PAGE 3: AUTHENTICATED FIELD GALLERY
+# PAGE 3: GALLERY
 # ==========================================
 with nav_tab3:
-    st.markdown("### 📸 Authenticated Field Gallery")
+    st.markdown("### 📸 Gallery")
     image_type_choice = st.segmented_control(
         "Select Photo Type:",
         options=["All Images", "Paid Assets", "Competitor Activities"],
