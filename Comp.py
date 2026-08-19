@@ -58,10 +58,20 @@ st.markdown("""
         border: 1px solid #fca5a5;
         margin-left: 6px;
     }
+    .enddate-badge {
+        background-color: #fef3c7;
+        color: #92400e;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 6px;
+        border: 1px solid #fde68a;
+        margin-left: 6px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# Helper function to parse pricing discount depth
+# Helper function to parse pricing discount depth AND offer end date
 def parse_price_discounts(text):
     if not isinstance(text, str) or pd.isna(text):
         return []
@@ -74,22 +84,44 @@ def parse_price_discounts(text):
         if not line_clean:
             continue
             
+        end_date = None
+        
+        # 1. Extract and sanitize trailing end dates: e.g., "end date 31/8/26", "end date 31/8", or "(31/8)"
+        date_match = re.search(r'(?:end\s*date\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
+        if date_match:
+            end_date = date_match.group(1).strip()
+            # Strip out the date portion to cleanly match pricing regex patterns
+            line_clean = re.sub(r'(?:end\s*date\s*|\()?\d{1,2}/\d{1,2}(?:/\d{2,4})?\)?', '', line_clean, flags=re.IGNORECASE).strip()
+
         found = False
-        match1 = re.search(r"(.+?)(?:@|now\s*)\s*(\d+)\s*(?:from|was)\s*(\d+)", line_clean, re.IGNORECASE)
-        if match1:
-            product = match1.group(1).strip()
-            new_price = float(match1.group(2))
-            old_price = float(match1.group(3))
+        old_price, new_price, product = None, None, line_clean
+
+        # Pattern 1: Product ... now/at/KSh 400 from/was 595
+        m1 = re.search(r"(.+?)(?:@|now\s*|KSh\s*)?\s*(\d+(?:\.\d+)?)\s*(?:from|was)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
+        # Pattern 2: Product ... was/from 595 now/at/KSh 400
+        m2 = re.search(r"(.+?)(?:was|from)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)\s*(?:now|@|to|mow|KSh)?\s*(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
+        # Pattern 3: Product ... 595 - 400 or 595/400
+        m3 = re.search(r"(.+?)(?:KSh\s*)?(\d+(?:\.\d+)?)\s*[\-/]\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
+
+        if m1:
+            product = m1.group(1).strip()
+            new_price = float(m1.group(2))
+            old_price = float(m1.group(3))
             found = True
-        else:
-            match2 = re.search(r"(.+?)(?:was\s*)\s*(\d+)\s*(?:now\s*|@\s*)\s*(\d+)", line_clean, re.IGNORECASE)
-            if match2:
-                product = match2.group(1).strip()
-                old_price = float(match2.group(2))
-                new_price = float(match2.group(3))
+        elif m2:
+            product = m2.group(1).strip()
+            old_price = float(m2.group(2))
+            new_price = float(m2.group(3))
+            found = True
+        elif m3:
+            product = m3.group(1).strip()
+            p1 = float(m3.group(2))
+            p2 = float(m3.group(3))
+            if p1 > p2:
+                old_price, new_price = p1, p2
                 found = True
-                
-        if found and old_price > new_price:
+
+        if found and old_price and new_price and old_price > new_price:
             discount_amount = old_price - new_price
             discount_pct = (discount_amount / old_price) * 100
             parsed_items.append({
@@ -98,6 +130,7 @@ def parse_price_discounts(text):
                 "new_price": new_price,
                 "discount_amount": discount_amount,
                 "discount_pct": discount_pct,
+                "end_date": end_date,
                 "raw_line": line_clean
             })
         else:
@@ -107,6 +140,7 @@ def parse_price_discounts(text):
                 "new_price": None,
                 "discount_amount": None,
                 "discount_pct": None,
+                "end_date": end_date,
                 "raw_line": line_clean
             })
             
@@ -119,12 +153,13 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     # 1. Competitor Activities Sheet
     ws_comp = wb.active
     ws_comp.title = "Competitor Depth & Activity"
-    ws_comp.append(["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Embedded Image"])
+    ws_comp.append(["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Offer End Date", "Embedded Image"])
     
     for row_idx, item in enumerate(comp_rows, start=2):
         ws_comp.append([
             item["Date"], item["Outlet"], item["Field Rep"], 
-            item["Activity"], item["Was"], item["Now"], item["Depth"], ""
+            item["Activity"], item["Was"], item["Now"], item["Depth"], 
+            item.get("End Date", "N/A"), ""
         ])
         ws_comp.row_dimensions[row_idx].height = 60
         
@@ -142,11 +177,11 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
                     img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
                     xl_img = OpenPyxlImage(img_bytes)
-                    ws_comp.add_image(xl_img, f"H{row_idx}")
+                    ws_comp.add_image(xl_img, f"I{row_idx}")
             except Exception:
-                ws_comp.cell(row=row_idx, column=8, value="[Image Unavailable]")
+                ws_comp.cell(row=row_idx, column=9, value="[Image Unavailable]")
 
-    ws_comp.column_dimensions['H'].width = 15
+    ws_comp.column_dimensions['I'].width = 15
 
     # 2. Paid Assets Sheet
     ws_paid = wb.create_sheet(title="Paid Asset Executions")
@@ -335,13 +370,14 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                     "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
                     "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
                     "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A",
+                    "End Date": item["end_date"] if item["end_date"] else "N/A",
                     "image_url": first_img
                 })
         else:
             global_comp_rows.append({
                 "Date": timestamp_str, "Outlet": outlet, "Field Rep": rep,
                 "Activity": "Competitor activity confirmed (no notes entered).",
-                "Was": "N/A", "Now": "N/A", "Depth": "N/A", "image_url": first_img
+                "Was": "N/A", "Now": "N/A", "Depth": "N/A", "End Date": "N/A", "image_url": first_img
             })
 
 global_paid_rows = []
@@ -427,15 +463,18 @@ with nav_tab2:
                             if parsed_discounts:
                                 st.markdown("**Reported Pricing / Activities:**")
                                 for item in parsed_discounts:
+                                    end_date_html = f"<span class='enddate-badge'>⏳ Ends: {item['end_date']}</span>" if item.get("end_date") else ""
+                                    
                                     if item.get("discount_amount"):
                                         st.markdown(
                                             f"- **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
                                             f"<span style='text-decoration: line-through; color: #888;'>from KSh {item['old_price']:.0f}</span> "
-                                            f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span>", 
+                                            f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span>"
+                                            f"{end_date_html}", 
                                             unsafe_allow_html=True
                                         )
                                     else:
-                                        st.markdown(f"- {item['raw_line']}")
+                                        st.markdown(f"- {item['raw_line']} {end_date_html}", unsafe_allow_html=True)
                             else:
                                 st.info("Competitor activity confirmed (no text notes entered).")
                             
