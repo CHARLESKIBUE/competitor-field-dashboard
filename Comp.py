@@ -6,6 +6,8 @@ from io import BytesIO
 from PIL import Image
 import openpyxl
 from openpyxl.drawing.image import Image as OpenPyxlImage
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 # --- JOTFORM API KEY ---
 JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
@@ -71,36 +73,83 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper function to parse pricing discount depth AND offer end date
-def parse_price_discounts(text):
+# Helper function to parse pricing discount depth, promo start/end dates, AND duration
+def parse_price_discounts(text, submission_date=None):
     if not isinstance(text, str) or pd.isna(text):
         return []
     
     parsed_items = []
     lines = text.split('\n')
+    current_year = datetime.now().year
     
     for line in lines:
         line_clean = line.strip('-* ').strip()
         if not line_clean:
             continue
             
-        end_date = None
+        start_date_str = None
+        end_date_str = None
+        duration_days = None
         
-        # 1. Extract and sanitize trailing end dates: e.g., "end date 31/8/26", "end date 31/8", or "(31/8)"
-        date_match = re.search(r'(?:end\s*date\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
-        if date_match:
-            end_date = date_match.group(1).strip()
-            # Strip out the date portion to cleanly match pricing regex patterns
-            line_clean = re.sub(r'(?:end\s*date\s*|\()?\d{1,2}/\d{1,2}(?:/\d{2,4})?\)?', '', line_clean, flags=re.IGNORECASE).strip()
+        # 1. Check for explicit Date Ranges (e.g., "01/09-30/09", "01/9 to 30/9")
+        range_match = re.search(r'(?:from\s*|start\s*)?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s*(?:to|-|until|–)\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
+        
+        if range_match:
+            start_date_str = range_match.group(1).strip()
+            end_date_str = range_match.group(2).strip()
+            line_clean = re.sub(r'(?:from\s*|start\s*)?\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*(?:to|-|until|–)\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
+        else:
+            # 2. Check for single Start Date (e.g., "start 01/9", "from 01/09")
+            start_match = re.search(r'(?:start\s*date\s*|start\s*|from\s*)(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
+            if start_match:
+                start_date_str = start_match.group(1).strip()
+                line_clean = re.sub(r'(?:start\s*date\s*|start\s*|from\s*)\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
+
+            # 3. Check for single End Date (e.g., "ends 31/10", "end date 31/10", "(31/10)")
+            end_match = re.search(r'(?:end\s*date\s*|ends\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
+            if end_match:
+                end_date_str = end_match.group(1).strip()
+                line_clean = re.sub(r'(?:end\s*date\s*|ends\s*|\()?\d{1,2}/\d{1,2}(?:/\d{2,4})?\)?', '', line_clean, flags=re.IGNORECASE).strip()
+
+        # FALLBACK: If Start Date is not keyed in, pick the Key-In / Submission Date
+        if not start_date_str and submission_date:
+            if isinstance(submission_date, (pd.Timestamp, datetime)):
+                start_date_str = submission_date.strftime("%d/%m/%Y")
+            elif isinstance(submission_date, str) and submission_date != "Recent Entry":
+                try:
+                    dt_parsed = pd.to_datetime(submission_date, errors='coerce')
+                    if pd.notna(dt_parsed):
+                        start_date_str = dt_parsed.strftime("%d/%m/%Y")
+                except Exception:
+                    pass
+
+        # Helper to convert date strings to datetime objects
+        def parse_to_date(d_str):
+            if not d_str:
+                return None
+            parts = str(d_str).split('/')
+            if len(parts) == 2:
+                d_str = f"{d_str}/{current_year}"
+            elif len(parts) == 3 and len(parts[2]) == 2:
+                parts[2] = f"20{parts[2]}"
+                d_str = "/".join(parts)
+            try:
+                return datetime.strptime(d_str, "%d/%m/%Y").date()
+            except Exception:
+                return None
+
+        d_start = parse_to_date(start_date_str)
+        d_end = parse_to_date(end_date_str)
+
+        # Calculate duration in days
+        if d_start and d_end and d_end >= d_start:
+            duration_days = (d_end - d_start).days + 1
 
         found = False
         old_price, new_price, product = None, None, line_clean
 
-        # Pattern 1: Product ... now/at/KSh 400 from/was 595
         m1 = re.search(r"(.+?)(?:@|now\s*|KSh\s*)?\s*(\d+(?:\.\d+)?)\s*(?:from|was)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
-        # Pattern 2: Product ... was/from 595 now/at/KSh 400
         m2 = re.search(r"(.+?)(?:was|from)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)\s*(?:now|@|to|mow|KSh)?\s*(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
-        # Pattern 3: Product ... 595 - 400 or 595/400
         m3 = re.search(r"(.+?)(?:KSh\s*)?(\d+(?:\.\d+)?)\s*[\-/]\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
 
         if m1:
@@ -130,7 +179,9 @@ def parse_price_discounts(text):
                 "new_price": new_price,
                 "discount_amount": discount_amount,
                 "discount_pct": discount_pct,
-                "end_date": end_date,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+                "duration_days": duration_days,
                 "raw_line": line_clean
             })
         else:
@@ -140,48 +191,88 @@ def parse_price_discounts(text):
                 "new_price": None,
                 "discount_amount": None,
                 "discount_pct": None,
-                "end_date": end_date,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+                "duration_days": duration_days,
                 "raw_line": line_clean
             })
             
     return parsed_items
 
+# --- CACHED HIGH-SPEED IMAGE DOWNLOADER ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_and_resize_image(url):
+    """Fetch an image and convert it to a resized byte buffer with caching."""
+    if not url or pd.isna(url) or str(url).strip() in ["", "nan", "None"]:
+        return None
+        
+    auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    try:
+        res = requests.get(auth_url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            img = Image.open(BytesIO(res.content))
+            img.thumbnail((75, 75))
+            img_bytes = BytesIO()
+            img.save(img_bytes, format='PNG')
+            img_bytes.seek(0)
+            return img_bytes.getvalue()
+    except Exception:
+        pass
+    return None
+
+def fetch_all_images_parallel(urls):
+    """Concurrently download and process images using thread pools."""
+    unique_urls = list(set([u for u in urls if u]))
+    url_to_bytes = {}
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_url = {executor.submit(fetch_and_resize_image, url): url for url in unique_urls}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                img_data = future.result()
+                if img_data:
+                    url_to_bytes[url] = img_data
+            except Exception:
+                pass
+    return url_to_bytes
+
 # --- EXCEL IMAGE EMBEDDING GENERATOR ---
 def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     wb = openpyxl.Workbook()
     
+    # Pre-fetch all images concurrently
+    all_urls = [item.get("image_url") for item in comp_rows + paid_rows if item.get("image_url")]
+    image_cache = fetch_all_images_parallel(all_urls)
+    
     # 1. Competitor Activities Sheet
     ws_comp = wb.active
     ws_comp.title = "Competitor Depth & Activity"
-    ws_comp.append(["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Offer End Date", "Embedded Image"])
+    ws_comp.append(["Date", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Start Date", "Offer End Date", "Promo Duration", "Embedded Image"])
     
     for row_idx, item in enumerate(comp_rows, start=2):
         ws_comp.append([
             item["Date"], item["Outlet"], item["Field Rep"], 
             item["Activity"], item["Was"], item["Now"], item["Depth"], 
-            item.get("End Date", "N/A"), ""
+            item.get("Start Date", "N/A"), item.get("End Date", "N/A"),
+            item.get("Duration Days", "N/A"), ""
         ])
         ws_comp.row_dimensions[row_idx].height = 60
         
-        if item.get("image_url"):
+        img_url = item.get("image_url")
+        if img_url in image_cache:
             try:
-                url = item["image_url"]
-                auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
-                headers = {"User-Agent": "Mozilla/5.0"}
-                res = requests.get(auth_url, headers=headers, timeout=3)
-                
-                if res.status_code == 200:
-                    img = Image.open(BytesIO(res.content))
-                    img.thumbnail((75, 75))
-                    img_bytes = BytesIO()
-                    img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    xl_img = OpenPyxlImage(img_bytes)
-                    ws_comp.add_image(xl_img, f"I{row_idx}")
+                img_bytes = BytesIO(image_cache[img_url])
+                xl_img = OpenPyxlImage(img_bytes)
+                ws_comp.add_image(xl_img, f"K{row_idx}")
             except Exception:
-                ws_comp.cell(row=row_idx, column=9, value="[Image Unavailable]")
+                ws_comp.cell(row=row_idx, column=11, value="[Image Error]")
+        elif img_url:
+            ws_comp.cell(row=row_idx, column=11, value="[Image Unavailable]")
 
-    ws_comp.column_dimensions['I'].width = 15
+    ws_comp.column_dimensions['K'].width = 15
 
     # 2. Paid Assets Sheet
     ws_paid = wb.create_sheet(title="Paid Asset Executions")
@@ -194,23 +285,16 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
         ])
         ws_paid.row_dimensions[row_idx].height = 60
         
-        if item.get("image_url"):
+        img_url = item.get("image_url")
+        if img_url in image_cache:
             try:
-                url = item["image_url"]
-                auth_url = f"{url}{'&' if '?' in url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in url else url
-                headers = {"User-Agent": "Mozilla/5.0"}
-                res = requests.get(auth_url, headers=headers, timeout=3)
-                
-                if res.status_code == 200:
-                    img = Image.open(BytesIO(res.content))
-                    img.thumbnail((75, 75))
-                    img_bytes = BytesIO()
-                    img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    xl_img = OpenPyxlImage(img_bytes)
-                    ws_paid.add_image(xl_img, f"E{row_idx}")
+                img_bytes = BytesIO(image_cache[img_url])
+                xl_img = OpenPyxlImage(img_bytes)
+                ws_paid.add_image(xl_img, f"E{row_idx}")
             except Exception:
-                ws_paid.cell(row=row_idx, column=5, value="[Image Unavailable]")
+                ws_paid.cell(row=row_idx, column=5, value="[Image Error]")
+        elif img_url:
+            ws_paid.cell(row=row_idx, column=5, value="[Image Unavailable]")
 
     ws_paid.column_dimensions['E'].width = 15
 
@@ -353,7 +437,11 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
         rep = row.get("Select Your Name", "Unknown Rep")
         activity = row.get(desc_col, "No description provided.")
         timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
-        parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
+        
+        parsed_discounts = parse_price_discounts(
+            str(activity), 
+            submission_date=row.get('Parsed_Date', timestamp_str)
+        ) if pd.notna(activity) else []
         
         first_img = None
         for img_col in comp_image_cols:
@@ -370,14 +458,18 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
                     "Was": f"KSh {item['old_price']:.0f}" if item["old_price"] else "N/A",
                     "Now": f"KSh {item['new_price']:.0f}" if item["new_price"] else "N/A",
                     "Depth": f"Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)" if item["discount_amount"] else "N/A",
+                    "Start Date": item["start_date"] if item["start_date"] else "N/A",
                     "End Date": item["end_date"] if item["end_date"] else "N/A",
+                    "Duration Days": f"{item['duration_days']} Days" if item["duration_days"] else "N/A",
                     "image_url": first_img
                 })
         else:
             global_comp_rows.append({
                 "Date": timestamp_str, "Outlet": outlet, "Field Rep": rep,
                 "Activity": "Competitor activity confirmed (no notes entered).",
-                "Was": "N/A", "Now": "N/A", "Depth": "N/A", "End Date": "N/A", "image_url": first_img
+                "Was": "N/A", "Now": "N/A", "Depth": "N/A", 
+                "Start Date": "N/A", "End Date": "N/A", "Duration Days": "N/A",
+                "image_url": first_img
             })
 
 global_paid_rows = []
@@ -451,7 +543,11 @@ with nav_tab2:
                         rep = row.get("Select Your Name", "Unknown Rep")
                         activity = row.get(desc_col, "No description provided.")
                         timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
-                        parsed_discounts = parse_price_discounts(str(activity)) if pd.notna(activity) else []
+                        
+                        parsed_discounts = parse_price_discounts(
+                            str(activity), 
+                            submission_date=row.get('Parsed_Date', timestamp_str)
+                        ) if pd.notna(activity) else []
 
                         with st.container():
                             header_col1, header_col2 = st.columns([3, 1])
@@ -463,18 +559,20 @@ with nav_tab2:
                             if parsed_discounts:
                                 st.markdown("**Reported Pricing / Activities:**")
                                 for item in parsed_discounts:
+                                    start_date_html = f"<span class='enddate-badge'>🚀 Starts: {item['start_date']}</span>" if item.get("start_date") else ""
                                     end_date_html = f"<span class='enddate-badge'>⏳ Ends: {item['end_date']}</span>" if item.get("end_date") else ""
+                                    duration_html = f"<span class='discount-badge'>📅 Duration: {item['duration_days']} Days</span>" if item.get("duration_days") else ""
                                     
                                     if item.get("discount_amount"):
                                         st.markdown(
                                             f"- **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
                                             f"<span style='text-decoration: line-through; color: #888;'>from KSh {item['old_price']:.0f}</span> "
-                                            f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span>"
-                                            f"{end_date_html}", 
+                                            f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span> "
+                                            f"{start_date_html} {end_date_html} {duration_html}", 
                                             unsafe_allow_html=True
                                         )
                                     else:
-                                        st.markdown(f"- {item['raw_line']} {end_date_html}", unsafe_allow_html=True)
+                                        st.markdown(f"- {item['raw_line']} {start_date_html} {end_date_html} {duration_html}", unsafe_allow_html=True)
                             else:
                                 st.info("Competitor activity confirmed (no text notes entered).")
                             
@@ -508,7 +606,7 @@ with nav_tab2:
                     st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
                     
                     if st.button("🔄 Generate Excel Package", key="comp_excel_btn"):
-                        with st.spinner("Compiling images and building Excel sheets..."):
+                        with st.spinner("Compiling images concurrently and building Excel workbook..."):
                             excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
                             st.download_button(
                                 label="📊 Download Excel Workbook (.xlsx)",
@@ -576,7 +674,7 @@ with nav_tab2:
                     st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
                     
                     if st.button("🔄 Generate Excel Package", key="paid_excel_btn"):
-                        with st.spinner("Compiling images and building Excel sheets..."):
+                        with st.spinner("Compiling images concurrently and building Excel workbook..."):
                             excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
                             st.download_button(
                                 label="📊 Download Excel Workbook (.xlsx)",
