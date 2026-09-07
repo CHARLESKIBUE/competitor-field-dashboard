@@ -1,5 +1,9 @@
 streamlit
 pandas
-requests
-Pillow
+plotly
 openpyxl
+xlsxwriter
+python-dateutil
+requests
+pillow
+python-pptx
