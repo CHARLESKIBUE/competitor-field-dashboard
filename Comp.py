@@ -26,56 +26,99 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling
+# Custom Executive CSS Styling
 st.markdown("""
     <style>
+    /* Global Typography & Palette */
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        color: #0F172A !important;
+    }
+    
+    /* Clean Modern Sidebar */
     div[data-testid="stSidebar"] {
-        background-color: #f8f9fa;
-        padding-top: 15px;
+        background-color: #F8FAFC !important;
+        border-right: 1px solid #E2E8F0 !important;
+        padding-top: 1.5rem !important;
     }
     div[data-testid="stSidebar"] label {
         font-weight: 600 !important;
-        color: #2c3e50 !important;
+        color: #334155 !important;
+        font-size: 0.85rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
     }
-    button[data-baseweb="tab"] {
-        font-size: 16px !important;
-        font-weight: 700 !important;
-        color: #1e293b !important;
-        padding: 10px 20px !important;
-        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+
+    /* Executive Card Container */
+    .exec-card {
+        background-color: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
     }
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #0f172a !important;
-        border-bottom-color: #0f172a !important;
+    
+    /* Outlet Header Styling */
+    .outlet-header {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #0F172A;
+        margin-bottom: 4px;
     }
-    .timestamp-badge {
-        background-color: #eef2f7;
+    .rep-subtitle {
+        font-size: 0.85rem;
+        color: #64748B;
+        font-weight: 500;
+    }
+
+    /* Minimalist Executive Badges */
+    .exec-badge-timestamp {
+        background-color: #F1F5F9;
         color: #475569;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
         padding: 4px 10px;
-        border-radius: 12px;
-        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        border: 1px solid #CBD5E1;
     }
-    .discount-badge {
-        background-color: #f1f5f9;
-        color: #0f172a;
-        font-size: 12px;
+    .exec-badge-discount {
+        background-color: #FEF2F2;
+        color: #991B1B;
+        font-size: 11px;
         font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 6px;
-        border: 1px solid #cbd5e1;
-        margin-left: 6px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        border: 1px solid #FCA5A5;
     }
-    .enddate-badge {
-        background-color: #fef3c7;
-        color: #92400e;
-        font-size: 12px;
+    .exec-badge-date {
+        background-color: #F8FAFC;
+        color: #334155;
+        font-size: 11px;
         font-weight: 600;
-        padding: 2px 8px;
-        border-radius: 6px;
-        border: 1px solid #fde68a;
-        margin-left: 6px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        border: 1px solid #E2E8F0;
+    }
+    
+    /* Clean Tab Bar Styling */
+    button[data-baseweb="tab"] {
+        font-size: 14px !important;
+        font-weight: 600 !important;
+        color: #64748B !important;
+        padding: 8px 16px !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #0F172A !important;
+        border-bottom-color: #0F172A !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Metric Cards Fix */
+    [data-testid="stMetricValue"] {
+        font-size: 1.8rem !important;
+        font-weight: 700 !important;
+        color: #0F172A !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -263,7 +306,6 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
         img_url = item.get("image_url")
         if img_url in image_cache:
             try:
-                # Fresh BytesIO stream per image insertion prevents openpyxl/PIL thread locks
                 img_bytes = BytesIO(image_cache[img_url])
                 xl_img = OpenPyxlImage(img_bytes)
                 xl_img.width = 70
@@ -443,7 +485,7 @@ except Exception as e:
     st.error(f"Failed to load live data: {e}")
     st.stop()
 
-# --- 3. SIDEBAR FILTERS (UPDATED TO STACKED RANGE AS IN SCREENSHOT) ---
+# --- 3. SIDEBAR FILTERS (STACKED RANGE LAYOUT) ---
 st.sidebar.markdown("### Date")
 
 valid_dates = df['Parsed_Date'].dropna() if 'Parsed_Date' in df.columns else pd.Series()
@@ -621,16 +663,16 @@ with nav_tab1:
 with nav_tab2:
     tab_comp, tab_paid = st.tabs(["🚨 Competitor Activity & Price Depth", "📦 Paid Asset Executions"])
 
-    # SUB-TAB 1: COMPETITOR ACTIVITY
+    # SUB-TAB 1: COMPETITOR ACTIVITY (EXECUTIVE VIEW)
     with tab_comp:
         if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
             comp_df = filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"]
             
             if not comp_df.empty:
-                comp_summary_col1, comp_summary_col2 = st.columns([2.2, 1])
+                comp_summary_col1, comp_summary_col2 = st.columns([2.5, 1])
                 
                 with comp_summary_col1:
-                    st.markdown("##### Detailed Competitor Price Cuts & Depth Analysis")
+                    st.markdown("#### Competitor Price Cuts & Depth Analysis")
                     for _, row in comp_df.iterrows():
                         outlet = row.get("Type Outlet Name", "Unknown Outlet")
                         rep = row.get("Select Your Name", "Unknown Rep")
@@ -643,56 +685,59 @@ with nav_tab2:
                         ) if pd.notna(activity) else []
 
                         with st.container():
-                            header_col1, header_col2 = st.columns([3, 1])
-                            with header_col1:
-                                st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
-                            with header_col2:
-                                st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
+                            st.markdown(f"""
+                                <div class="exec-card">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                        <div>
+                                            <span class="outlet-header">📍 {outlet}</span>
+                                            <span class="rep-subtitle"> &nbsp;|&nbsp; Field Rep: {rep}</span>
+                                        </div>
+                                        <div>
+                                            <span class="exec-badge-timestamp">⏱️ {timestamp_str}</span>
+                                        </div>
+                                    </div>
+                            """, unsafe_allow_html=True)
                             
                             if parsed_discounts:
-                                st.markdown("**Reported Pricing / Activities:**")
                                 for item in parsed_discounts:
-                                    start_date_html = f"<span class='enddate-badge'>🚀 Starts: {item['start_date']}</span>" if item.get("start_date") else ""
-                                    end_date_html = f"<span class='enddate-badge'>⏳ Ends: {item['end_date']}</span>" if item.get("end_date") else ""
-                                    duration_html = f"<span class='discount-badge'>📅 Duration: {item['duration_days']} Days</span>" if item.get("duration_days") else ""
+                                    start_html = f"<span class='exec-badge-date'>Start: {item['start_date']}</span>" if item.get("start_date") else ""
+                                    end_html = f"<span class='exec-badge-date'>End: {item['end_date']}</span>" if item.get("end_date") else ""
+                                    dur_html = f"<span class='exec-badge-date'>Duration: {item['duration_days']} Days</span>" if item.get("duration_days") else ""
                                     
                                     if item.get("discount_amount"):
                                         st.markdown(
-                                            f"- **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
-                                            f"<span style='text-decoration: line-through; color: #888;'>from KSh {item['old_price']:.0f}</span> "
-                                            f"<span class='discount-badge'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span> "
-                                            f"{start_date_html} {end_date_html} {duration_html}", 
+                                            f"• **{item['product']}**: Now **KSh {item['new_price']:.0f}** "
+                                            f"<span style='text-decoration: line-through; color: #94A3B8;'>from KSh {item['old_price']:.0f}</span> "
+                                            f"<span class='exec-badge-discount'>Save KSh {item['discount_amount']:.0f} ({item['discount_pct']:.1f}% OFF)</span> "
+                                            f"{start_html} {end_html} {dur_html}", 
                                             unsafe_allow_html=True
                                         )
                                     else:
-                                        st.markdown(f"- {item['raw_line']} {start_date_html} {end_date_html} {duration_html}", unsafe_allow_html=True)
+                                        st.markdown(f"• {item['raw_line']} {start_html} {end_html} {dur_html}", unsafe_allow_html=True)
                             else:
-                                st.info("Competitor activity confirmed (no text notes entered).")
-                            
+                                st.caption("Competitor activity confirmed (no specific notes entered).")
+                                
                             comp_images = []
                             for img_col in comp_image_cols:
                                 img_val = row.get(img_col)
                                 if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
                                     for u in str(img_val).split(","):
                                         if u.strip():
-                                            title = str(img_col).replace("Take Photo of competitor activites", "Competitor Activity").strip()
-                                            comp_images.append((title, u.strip()))
+                                            comp_images.append(u.strip())
                             
                             if comp_images:
-                                st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                                 img_cols = st.columns(min(len(comp_images), 4))
-                                for idx, (img_title, raw_url) in enumerate(comp_images):
+                                for idx, raw_url in enumerate(comp_images):
                                     auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
                                     with img_cols[idx % 4]:
                                         st.markdown(f'''
-                                            <div style="margin-bottom: 8px;">
-                                                <span style="font-size: 11px; font-weight: 600; color: #0f172a;">{img_title}</span>
-                                                <a href="{auth_url}" target="_blank">
-                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
-                                                </a>
-                                            </div>
+                                            <a href="{auth_url}" target="_blank">
+                                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #E2E8F0;">
+                                            </a>
                                         ''', unsafe_allow_html=True)
-                            st.divider()
+                                        
+                            st.markdown("</div>", unsafe_allow_html=True)
                     
                 with comp_summary_col2:
                     st.markdown("##### 📥 Export Package")
@@ -719,7 +764,7 @@ with nav_tab2:
                 paid_df = paid_df[paid_df[asset_select_col].notna() & (paid_df[asset_select_col].astype(str).str.strip() != "")]
             
             if not paid_df.empty:
-                paid_col_left, paid_col_right = st.columns([2.2, 1])
+                paid_col_left, paid_col_right = st.columns([2.5, 1])
                 
                 with paid_col_left:
                     for _, row in paid_df.iterrows():
@@ -729,11 +774,18 @@ with nav_tab2:
                         timestamp_str = row.get('Formatted_Timestamp', 'Recent Entry')
 
                         with st.container():
-                            header_col1, header_col2 = st.columns([3, 1])
-                            with header_col1:
-                                st.markdown(f"📍 **{outlet}** &nbsp;*(Rep: {rep})*", unsafe_allow_html=True)
-                            with header_col2:
-                                st.markdown(f"<div style='text-align: right;'><span class='timestamp-badge'>⏱️ {timestamp_str}</span></div>", unsafe_allow_html=True)
+                            st.markdown(f"""
+                                <div class="exec-card">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                        <div>
+                                            <span class="outlet-header">📍 {outlet}</span>
+                                            <span class="rep-subtitle"> &nbsp;|&nbsp; Field Rep: {rep}</span>
+                                        </div>
+                                        <div>
+                                            <span class="exec-badge-timestamp">⏱️ {timestamp_str}</span>
+                                        </div>
+                                    </div>
+                            """, unsafe_allow_html=True)
                             
                             st.markdown(f"**Asset Types Executed:** `{assets}`")
                             
@@ -743,24 +795,20 @@ with nav_tab2:
                                 if pd.notna(img_val) and str(img_val).strip() != "" and str(img_val).strip().lower() != "nan":
                                     for u in str(img_val).split(","):
                                         if u.strip():
-                                            title = str(img_col).replace("Take Photo of paid assets", "Paid Asset").replace("(", "").replace(")", "").strip()
-                                            paid_images.append((title, u.strip()))
+                                            paid_images.append(u.strip())
                             
                             if paid_images:
-                                st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                                 img_cols = st.columns(min(len(paid_images), 4))
-                                for idx, (img_title, raw_url) in enumerate(paid_images):
+                                for idx, raw_url in enumerate(paid_images):
                                     auth_url = f"{raw_url}{'&' if '?' in raw_url else '?'}apiKey={JOTFORM_API_KEY}" if "jotform.com" in raw_url else raw_url
                                     with img_cols[idx % 4]:
                                         st.markdown(f'''
-                                            <div style="margin-bottom: 8px;">
-                                                <span style="font-size: 11px; font-weight: 600; color: #0f172a;">{img_title}</span>
-                                                <a href="{auth_url}" target="_blank">
-                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
-                                                </a>
-                                            </div>
+                                            <a href="{auth_url}" target="_blank">
+                                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #E2E8F0;">
+                                            </a>
                                         ''', unsafe_allow_html=True)
-                            st.divider()
+                            st.markdown("</div>", unsafe_allow_html=True)
 
                 with paid_col_right:
                     st.markdown("##### 📥 Export Package")
@@ -833,9 +881,9 @@ with nav_tab3:
                         st.caption(f"⏱️ {timestamp_str}")
                         st.markdown(f'''
                             <a href="{auth_url}" target="_blank">
-                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #ced4da;">
+                                <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #E2E8F0;">
                             </a>
                             <br>
-                            <a href="{auth_url}" target="_blank" style="font-size: 12px; text-decoration: none; color: #0d6efd;">🔗 View Original</a>
+                            <a href="{auth_url}" target="_blank" style="font-size: 12px; text-decoration: none; color: #0F172A;">🔗 View Original</a>
                         ''', unsafe_allow_html=True)
                     col_index += 1
