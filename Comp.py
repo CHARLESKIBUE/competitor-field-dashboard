@@ -9,6 +9,13 @@ from openpyxl.drawing.image import Image as OpenPyxlImage
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+# PPTX Library Imports
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE
+
 # --- JOTFORM API KEY ---
 JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
 
@@ -91,7 +98,6 @@ def parse_price_discounts(text, submission_date=None):
         end_date_str = None
         duration_days = None
         
-        # 1. Check for explicit Date Ranges (e.g., "01/09-30/09", "01/9 to 30/9")
         range_match = re.search(r'(?:from\s*|start\s*)?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s*(?:to|-|until|–)\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
         
         if range_match:
@@ -99,13 +105,11 @@ def parse_price_discounts(text, submission_date=None):
             end_date_str = range_match.group(2).strip()
             line_clean = re.sub(r'(?:from\s*|start\s*)?\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*(?:to|-|until|–)\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
         else:
-            # 2. Check for single Start Date (e.g., "start 01/9", "from 01/09")
             start_match = re.search(r'(?:start\s*date\s*|start\s*|from\s*)(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
             if start_match:
                 start_date_str = start_match.group(1).strip()
                 line_clean = re.sub(r'(?:start\s*date\s*|start\s*|from\s*)\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
 
-            # 3. Check for single End Date (e.g., "ends 31/10", "end date 31/10", "(31/10)")
             end_match = re.search(r'(?:end\s*date\s*|ends\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
             if end_match:
                 end_date_str = end_match.group(1).strip()
@@ -123,7 +127,6 @@ def parse_price_discounts(text, submission_date=None):
                 except Exception:
                     pass
 
-        # Helper to convert date strings to datetime objects
         def parse_to_date(d_str):
             if not d_str:
                 return None
@@ -141,7 +144,6 @@ def parse_price_discounts(text, submission_date=None):
         d_start = parse_to_date(start_date_str)
         d_end = parse_to_date(end_date_str)
 
-        # Calculate duration in days
         if d_start and d_end and d_end >= d_start:
             duration_days = (d_end - d_start).days + 1
 
@@ -213,7 +215,7 @@ def fetch_and_resize_image(url):
         res = requests.get(auth_url, headers=headers, timeout=5)
         if res.status_code == 200:
             img = Image.open(BytesIO(res.content))
-            img.thumbnail((75, 75))
+            img.thumbnail((300, 300))
             img_bytes = BytesIO()
             img.save(img_bytes, format='PNG')
             img_bytes.seek(0)
@@ -242,8 +244,6 @@ def fetch_all_images_parallel(urls):
 # --- EXCEL IMAGE EMBEDDING GENERATOR ---
 def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     wb = openpyxl.Workbook()
-    
-    # Pre-fetch all images concurrently
     all_urls = [item.get("image_url") for item in comp_rows + paid_rows if item.get("image_url")]
     image_cache = fetch_all_images_parallel(all_urls)
     
@@ -308,6 +308,191 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     wb.save(output)
     output.seek(0)
     return output.getvalue()
+
+# --- POWERPOINT (.PPTX) REPORT GENERATOR MATCHING CIL BRAND DECK ---
+def generate_pptx_report(comp_rows, paid_rows):
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank_slide_layout = prs.slide_layouts[6]
+    
+    # Pre-fetch Images
+    all_urls = [item.get("image_url") for item in comp_rows + paid_rows if item.get("image_url")]
+    image_cache = fetch_all_images_parallel(all_urls)
+    
+    # CIL Theme Palette
+    RED_PRIMARY = RGBColor(231, 76, 60)
+    DARK_BLUE = RGBColor(30, 41, 59)
+    GRAY_TEXT = RGBColor(100, 116, 139)
+    WHITE = RGBColor(255, 255, 255)
+    LIGHT_BG = RGBColor(248, 249, 250)
+
+    # ----------------------------------------------------
+    # SLIDE 1: TITLE SLIDE (Matching CIL Deck)
+    # ----------------------------------------------------
+    slide_title = prs.slides.add_slide(blank_slide_layout)
+    
+    # Header Banner
+    header = slide_title.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(2.2))
+    header.fill.solid()
+    header.fill.fore_color.rgb = RED_PRIMARY
+    header.line.color.rgb = RED_PRIMARY
+    
+    tf = header.text_frame
+    p = tf.paragraphs[0]
+    p.text = "CHANDARIA CORE WEEKLY REVIEW"
+    p.font.size = Pt(36)
+    p.font.bold = True
+    p.font.color.rgb = WHITE
+    p.alignment = PP_ALIGN.LEFT
+    
+    p2 = tf.add_paragraph()
+    p2.text = f"Competitor Activities & Paid Asset Executions | {datetime.now().strftime('%d %B %Y')}"
+    p2.font.size = Pt(20)
+    p2.font.color.rgb = WHITE
+    
+    # KPI Summary Cards
+    kpi_box1 = slide_title.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.5), Inches(3.2), Inches(4.8), Inches(2.5))
+    kpi_box1.fill.solid()
+    kpi_box1.fill.fore_color.rgb = LIGHT_BG
+    kpi_box1.line.color.rgb = RED_PRIMARY
+    tf1 = kpi_box1.text_frame
+    p1 = tf1.paragraphs[0]
+    p1.text = f"\n🚨 {len(comp_rows)}\nCompetitor Activities Reported"
+    p1.font.size = Pt(24)
+    p1.font.bold = True
+    p1.font.color.rgb = DARK_BLUE
+    p1.alignment = PP_ALIGN.CENTER
+    
+    kpi_box2 = slide_title.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(7.0), Inches(3.2), Inches(4.8), Inches(2.5))
+    kpi_box2.fill.solid()
+    kpi_box2.fill.fore_color.rgb = LIGHT_BG
+    kpi_box2.line.color.rgb = RED_PRIMARY
+    tf2 = kpi_box2.text_frame
+    p2 = tf2.paragraphs[0]
+    p2.text = f"\n📦 {len(paid_rows)}\nPaid Assets Executed"
+    p2.font.size = Pt(24)
+    p2.font.bold = True
+    p2.font.color.rgb = DARK_BLUE
+    p2.alignment = PP_ALIGN.CENTER
+
+    # Helper function to add slide headers
+    def add_slide_header(slide, title_text, section_text="SECTION 3: FIELD EXECUTIONS"):
+        hdr = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(1.1))
+        hdr.fill.solid()
+        hdr.fill.fore_color.rgb = RED_PRIMARY
+        hdr.line.color.rgb = RED_PRIMARY
+        
+        tf = hdr.text_frame
+        p = tf.paragraphs[0]
+        p.text = title_text.upper()
+        p.font.size = Pt(22)
+        p.font.bold = True
+        p.font.color.rgb = WHITE
+        
+        p_sub = tf.add_paragraph()
+        p_sub.text = section_text
+        p_sub.font.size = Pt(12)
+        p_sub.font.color.rgb = WHITE
+
+    # ----------------------------------------------------
+    # SLIDE 2+: COMPETITOR ACTIVITIES SLIDES
+    # ----------------------------------------------------
+    comp_chunks = [comp_rows[i:i + 4] for i in range(0, len(comp_rows), 4)]
+    for page_idx, chunk in enumerate(comp_chunks, start=1):
+        slide = prs.slides.add_slide(blank_slide_layout)
+        add_slide_header(slide, f"Competitor Activities & Price Depth (Page {page_idx})")
+        
+        table_shape = slide.shapes.add_table(len(chunk) + 1, 7, Inches(0.5), Inches(1.4), Inches(12.333), Inches(5.5))
+        table = table_shape.table
+        
+        headers = ["Date", "Outlet & Rep", "Activity", "Was", "Now", "Depth & Duration", "Photo"]
+        widths = [Inches(1.2), Inches(2.0), Inches(2.8), Inches(0.8), Inches(0.8), Inches(2.2), Inches(2.5)]
+        
+        for idx, width in enumerate(widths):
+            table.columns[idx].width = width
+            
+        for idx, text in enumerate(headers):
+            cell = table.cell(0, idx)
+            cell.text = text
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = DARK_BLUE
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(12)
+                p.font.bold = True
+                p.font.color.rgb = WHITE
+                p.alignment = PP_ALIGN.CENTER
+                
+        for row_idx, item in enumerate(chunk, start=1):
+            table.cell(row_idx, 0).text = str(item["Date"])
+            table.cell(row_idx, 1).text = f"{item['Outlet']}\nRep: {item['Field Rep']}"
+            table.cell(row_idx, 2).text = str(item["Activity"])
+            table.cell(row_idx, 3).text = str(item["Was"])
+            table.cell(row_idx, 4).text = str(item["Now"])
+            table.cell(row_idx, 5).text = f"{item['Depth']}\nStarts: {item.get('Start Date','N/A')}\nEnds: {item.get('End Date','N/A')}\nDuration: {item.get('Duration Days','N/A')}"
+            
+            # Format text size
+            for c_idx in range(6):
+                for p in table.cell(row_idx, c_idx).text_frame.paragraphs:
+                    p.font.size = Pt(10)
+            
+            img_url = item.get("image_url")
+            if img_url in image_cache:
+                try:
+                    img_bytes = BytesIO(image_cache[img_url])
+                    slide.shapes.add_picture(img_bytes, Inches(10.5), Inches(1.5 + (row_idx - 1) * 1.3), Inches(1.8), Inches(1.1))
+                except Exception:
+                    table.cell(row_idx, 6).text = "[Image Error]"
+
+    # ----------------------------------------------------
+    # SLIDE 3+: PAID ASSETS SLIDES
+    # ----------------------------------------------------
+    paid_chunks = [paid_rows[i:i + 4] for i in range(0, len(paid_rows), 4)]
+    for page_idx, chunk in enumerate(paid_chunks, start=1):
+        slide = prs.slides.add_slide(blank_slide_layout)
+        add_slide_header(slide, f"Paid Asset Executions (Page {page_idx})")
+        
+        table_shape = slide.shapes.add_table(len(chunk) + 1, 4, Inches(0.5), Inches(1.4), Inches(12.333), Inches(5.5))
+        table = table_shape.table
+        
+        headers = ["Date", "Outlet & Rep", "Paid Assets Executed", "Execution Photo"]
+        widths = [Inches(1.8), Inches(3.0), Inches(4.5), Inches(3.033)]
+        
+        for idx, width in enumerate(widths):
+            table.columns[idx].width = width
+            
+        for idx, text in enumerate(headers):
+            cell = table.cell(0, idx)
+            cell.text = text
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = DARK_BLUE
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(13)
+                p.font.bold = True
+                p.font.color.rgb = WHITE
+                p.alignment = PP_ALIGN.CENTER
+                
+        for row_idx, item in enumerate(chunk, start=1):
+            table.cell(row_idx, 0).text = str(item["Date"])
+            table.cell(row_idx, 1).text = f"{item['Outlet']}\nRep: {item['Field Rep']}"
+            table.cell(row_idx, 2).text = str(item["Paid Assets Executed"])
+            
+            for c_idx in range(3):
+                for p in table.cell(row_idx, c_idx).text_frame.paragraphs:
+                    p.font.size = Pt(11)
+            
+            img_url = item.get("image_url")
+            if img_url in image_cache:
+                try:
+                    img_bytes = BytesIO(image_cache[img_url])
+                    slide.shapes.add_picture(img_bytes, Inches(10.0), Inches(1.5 + (row_idx - 1) * 1.3), Inches(1.8), Inches(1.1))
+                except Exception:
+                    table.cell(row_idx, 3).text = "[Image Error]"
+
+    ppt_output = BytesIO()
+    prs.save(ppt_output)
+    ppt_output.seek(0)
+    return ppt_output.getvalue()
 
 # 2. Load Data Function
 @st.cache_data(ttl=300)
@@ -603,17 +788,28 @@ with nav_tab2:
                     
                 with comp_summary_col2:
                     st.markdown("##### 📥 Export Package")
-                    st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
+                    st.info("Click below to compile Excel or PowerPoint review decks with embedded photos.")
                     
-                    if st.button("🔄 Generate Excel Package", key="comp_excel_btn"):
+                    if st.button("📊 Generate Excel Package", key="comp_excel_btn"):
                         with st.spinner("Compiling images concurrently and building Excel workbook..."):
                             excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
                             st.download_button(
-                                label="📊 Download Excel Workbook (.xlsx)",
+                                label="💾 Download Excel Workbook (.xlsx)",
                                 data=excel_bytes,
                                 file_name="Competitor_And_Paid_Assets_Report.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="comp_download_btn"
+                            )
+
+                    if st.button("📈 Generate CIL Weekly PPT Review", key="comp_ppt_btn"):
+                        with st.spinner("Building CIL branded PowerPoint deck..."):
+                            ppt_bytes = generate_pptx_report(global_comp_rows, global_paid_rows)
+                            st.download_button(
+                                label="💾 Download Presentation Deck (.pptx)",
+                                data=ppt_bytes,
+                                file_name="Chandaria_Competitor_And_Paid_Assets_Review.pptx",
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                key="comp_ppt_download_btn"
                             )
             else:
                 st.info("No competitor activities reported for the selected filters.")
@@ -671,17 +867,28 @@ with nav_tab2:
 
                 with paid_col_right:
                     st.markdown("##### 📥 Export Package")
-                    st.info("Click below to compile and download the `.xlsx` report package with embedded photos.")
+                    st.info("Click below to compile Excel or PowerPoint review decks with embedded photos.")
                     
-                    if st.button("🔄 Generate Excel Package", key="paid_excel_btn"):
+                    if st.button("📊 Generate Excel Package", key="paid_excel_btn"):
                         with st.spinner("Compiling images concurrently and building Excel workbook..."):
                             excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
                             st.download_button(
-                                label="📊 Download Excel Workbook (.xlsx)",
+                                label="💾 Download Excel Workbook (.xlsx)",
                                 data=excel_bytes,
                                 file_name="Competitor_And_Paid_Assets_Report.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="paid_download_btn"
+                            )
+
+                    if st.button("📈 Generate CIL Weekly PPT Review", key="paid_ppt_btn"):
+                        with st.spinner("Building CIL branded PowerPoint deck..."):
+                            ppt_bytes = generate_pptx_report(global_comp_rows, global_paid_rows)
+                            st.download_button(
+                                label="💾 Download Presentation Deck (.pptx)",
+                                data=ppt_bytes,
+                                file_name="Chandaria_Competitor_And_Paid_Assets_Review.pptx",
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                key="paid_ppt_download_btn"
                             )
             else:
                 st.info("No outlets with paid assets reported for the selected filters.")
