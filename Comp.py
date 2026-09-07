@@ -45,8 +45,8 @@ st.markdown("""
         font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
     }
     button[data-baseweb="tab"][aria-selected="true"] {
-        color: #e74c3c !important;
-        border-bottom-color: #e74c3c !important;
+        color: #0f172a !important;
+        border-bottom-color: #0f172a !important;
     }
     .timestamp-badge {
         background-color: #eef2f7;
@@ -58,13 +58,13 @@ st.markdown("""
         border: 1px solid #cbd5e1;
     }
     .discount-badge {
-        background-color: #fee2e2;
-        color: #991b1b;
+        background-color: #f1f5f9;
+        color: #0f172a;
         font-size: 12px;
         font-weight: 700;
         padding: 2px 8px;
         border-radius: 6px;
-        border: 1px solid #fca5a5;
+        border: 1px solid #cbd5e1;
         margin-left: 6px;
     }
     .enddate-badge {
@@ -314,51 +314,50 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     output.seek(0)
     return output.getvalue()
 
-# --- POWERPOINT (.PPTX) REPORT GENERATOR MATCHING BRAND DECK (PAID ASSETS ONLY) ---
+# --- POWERPOINT (.PPTX) GENERATOR MATCHING TEMPLATE_2 (PAID ASSETS ONLY - NO RED) ---
 def generate_pptx_report(paid_rows):
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
     blank_slide_layout = prs.slide_layouts[6]
     
-    # Pre-fetch Images for Paid Assets only
+    # Pre-fetch Images for Paid Assets
     all_urls = [item.get("image_url") for item in paid_rows if item.get("image_url")]
     image_cache = fetch_all_images_parallel(all_urls)
     
-    # Brand Template Colors
-    RED_PRIMARY = RGBColor(237, 28, 36)    # CIL Red
-    DARK_TEXT = RGBColor(30, 41, 59)
+    # Custom Palette Extracted from PPTX Template 2 (Strictly No Red)
+    DARK_NAVY = RGBColor(15, 23, 42)      # Primary Header & Text (#0F172A)
+    SLATE_MUTED = RGBColor(100, 116, 139) # Secondary Details (#64748B)
     WHITE = RGBColor(255, 255, 255)
 
     # ----------------------------------------------------
-    # SLIDE 1: TITLE SLIDE (Matching Template Slide 1 Layout)
+    # SLIDE 1: TITLE SLIDE (Matching Slide 1 in Template 2)
     # ----------------------------------------------------
     slide_title = prs.slides.add_slide(blank_slide_layout)
     
-    # Title Text Box
-    tb_title = slide_title.shapes.add_textbox(Inches(0.8), Inches(2.2), Inches(11.733), Inches(3.0))
+    # Clean Title Text Box
+    tb_title = slide_title.shapes.add_textbox(Inches(0.8), Inches(2.5), Inches(11.733), Inches(3.0))
     tf_title = tb_title.text_frame
     tf_title.word_wrap = True
     
     p1 = tf_title.paragraphs[0]
-    p1.text = "PAID ASSETS FIELD EXECUTIONS REVIEW"
-    p1.font.size = Pt(36)
+    p1.text = "IB WEEKLY FIELD FINDINGS"
+    p1.font.size = Pt(38)
     p1.font.bold = True
-    p1.font.color.rgb = RED_PRIMARY
+    p1.font.color.rgb = DARK_NAVY
     p1.font.name = "Arial"
     
     p2 = tf_title.add_paragraph()
-    p2.text = f"\nChandaria Industries Limited | Report Date: {datetime.now().strftime('%d %B %Y')}"
+    p2.text = f"\nPaid Asset Executions Review | {datetime.now().strftime('%d %B %Y')}"
     p2.font.size = Pt(20)
-    p2.font.bold = True
-    p2.font.color.rgb = DARK_TEXT
+    p2.font.color.rgb = SLATE_MUTED
     p2.font.name = "Arial"
 
-    # Bottom Accent Bar
+    # Bottom Dark Accent Bar
     bottom_bar = slide_title.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(6.8), Inches(13.333), Inches(0.7))
     bottom_bar.fill.solid()
-    bottom_bar.fill.fore_color.rgb = RED_PRIMARY
-    bottom_bar.line.color.rgb = RED_PRIMARY
+    bottom_bar.fill.fore_color.rgb = DARK_NAVY
+    bottom_bar.line.color.rgb = DARK_NAVY
 
     # ----------------------------------------------------
     # SLIDE 2+: PAID ASSET PHOTO GRID SLIDES (Matching Template 2x2 Grid)
@@ -369,7 +368,6 @@ def generate_pptx_report(paid_rows):
 
     chunks = [items_with_images[i:i + 4] for i in range(0, len(items_with_images), 4)]
     
-    # 2x2 Image Coordinates
     grid_positions = [
         {"left": Inches(0.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   # Top Left
         {"left": Inches(6.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   # Top Right
@@ -380,14 +378,14 @@ def generate_pptx_report(paid_rows):
     for slide_num, chunk in enumerate(chunks, start=1):
         slide = prs.slides.add_slide(blank_slide_layout)
         
-        # Subtitle Header Text
+        # Header Text Matching Template 2
         tb_hdr = slide.shapes.add_textbox(Inches(0.8), Inches(0.3), Inches(11.733), Inches(0.8))
         tf_hdr = tb_hdr.text_frame
         p_hdr = tf_hdr.paragraphs[0]
         p_hdr.text = f"PAID ASSETS EXECUTIONS (PAGE {slide_num})"
         p_hdr.font.size = Pt(22)
         p_hdr.font.bold = True
-        p_hdr.font.color.rgb = RED_PRIMARY
+        p_hdr.font.color.rgb = DARK_NAVY
         p_hdr.font.name = "Arial"
 
         for idx, item in enumerate(chunk):
@@ -401,10 +399,10 @@ def generate_pptx_report(paid_rows):
                 except Exception:
                     pass
             
-            # Label overlay below photo
+            # Muted Overlay Label at bottom of image
             bg_rect = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, pos["left"], pos["top"] + pos["height"] - Inches(0.4), pos["width"], Inches(0.4))
             bg_rect.fill.solid()
-            bg_rect.fill.fore_color.rgb = DARK_TEXT
+            bg_rect.fill.fore_color.rgb = DARK_NAVY
             bg_rect.line.fill.background()
 
             cap_box = slide.shapes.add_textbox(pos["left"], pos["top"] + pos["height"] - Inches(0.4), pos["width"], Inches(0.4))
@@ -705,9 +703,9 @@ with nav_tab2:
                                     with img_cols[idx % 4]:
                                         st.markdown(f'''
                                             <div style="margin-bottom: 8px;">
-                                                <span style="font-size: 11px; font-weight: 600; color: #e74c3c;">{img_title}</span>
+                                                <span style="font-size: 11px; font-weight: 600; color: #0f172a;">{img_title}</span>
                                                 <a href="{auth_url}" target="_blank">
-                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #fca5a5; margin-top: 2px;">
+                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
                                                 </a>
                                             </div>
                                         ''', unsafe_allow_html=True)
@@ -773,9 +771,9 @@ with nav_tab2:
                                     with img_cols[idx % 4]:
                                         st.markdown(f'''
                                             <div style="margin-bottom: 8px;">
-                                                <span style="font-size: 11px; font-weight: 600; color: #2ecc71;">{img_title}</span>
+                                                <span style="font-size: 11px; font-weight: 600; color: #0f172a;">{img_title}</span>
                                                 <a href="{auth_url}" target="_blank">
-                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #86efac; margin-top: 2px;">
+                                                    <img src="{auth_url}" width="100%" style="border-radius: 6px; border: 1px solid #cbd5e1; margin-top: 2px;">
                                                 </a>
                                             </div>
                                         ''', unsafe_allow_html=True)
