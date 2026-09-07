@@ -98,7 +98,6 @@ def parse_price_discounts(text, submission_date=None):
         end_date_str = None
         duration_days = None
         
-        # 1. Check for explicit Date Ranges (e.g., "01/09-30/09", "01/9 to 30/9")
         range_match = re.search(r'(?:from\s*|start\s*)?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s*(?:to|-|until|–)\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
         
         if range_match:
@@ -106,19 +105,16 @@ def parse_price_discounts(text, submission_date=None):
             end_date_str = range_match.group(2).strip()
             line_clean = re.sub(r'(?:from\s*|start\s*)?\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*(?:to|-|until|–)\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
         else:
-            # 2. Check for single Start Date (e.g., "start 01/9", "from 01/09")
             start_match = re.search(r'(?:start\s*date\s*|start\s*|from\s*)(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
             if start_match:
                 start_date_str = start_match.group(1).strip()
                 line_clean = re.sub(r'(?:start\s*date\s*|start\s*|from\s*)\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
 
-            # 3. Check for single End Date (e.g., "ends 31/10", "end date 31/10", "(31/10)")
             end_match = re.search(r'(?:end\s*date\s*|ends\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
             if end_match:
                 end_date_str = end_match.group(1).strip()
                 line_clean = re.sub(r'(?:end\s*date\s*|ends\s*|\()?\d{1,2}/\d{1,2}(?:/\d{2,4})?\)?', '', line_clean, flags=re.IGNORECASE).strip()
 
-        # FALLBACK: If Start Date is not keyed in, pick the Key-In / Submission Date
         if not start_date_str and submission_date:
             if isinstance(submission_date, (pd.Timestamp, datetime)):
                 start_date_str = submission_date.strftime("%d/%m/%Y")
@@ -130,7 +126,6 @@ def parse_price_discounts(text, submission_date=None):
                 except Exception:
                     pass
 
-        # Helper to convert date strings to datetime objects
         def parse_to_date(d_str):
             if not d_str:
                 return None
@@ -148,7 +143,6 @@ def parse_price_discounts(text, submission_date=None):
         d_start = parse_to_date(start_date_str)
         d_end = parse_to_date(end_date_str)
 
-        # Calculate duration in days
         if d_start and d_end and d_end >= d_start:
             duration_days = (d_end - d_start).days + 1
 
@@ -220,7 +214,7 @@ def fetch_and_resize_image(url):
         res = requests.get(auth_url, headers=headers, timeout=5)
         if res.status_code == 200:
             img = Image.open(BytesIO(res.content))
-            img.thumbnail((400, 400))
+            img.thumbnail((300, 300))
             img_bytes = BytesIO()
             img.save(img_bytes, format='PNG')
             img_bytes.seek(0)
@@ -246,7 +240,7 @@ def fetch_all_images_parallel(urls):
                 pass
     return url_to_bytes
 
-# --- EXCEL IMAGE EMBEDDING GENERATOR ---
+# --- EXCEL IMAGE EMBEDDING GENERATOR (STABLE & CRASH-PROOF) ---
 def generate_excel_with_images(comp_rows, paid_rows, raw_df):
     wb = openpyxl.Workbook()
     all_urls = [item.get("image_url") for item in comp_rows + paid_rows if item.get("image_url")]
@@ -269,8 +263,11 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
         img_url = item.get("image_url")
         if img_url in image_cache:
             try:
+                # Fresh BytesIO stream per image insertion prevents openpyxl/PIL thread locks
                 img_bytes = BytesIO(image_cache[img_url])
                 xl_img = OpenPyxlImage(img_bytes)
+                xl_img.width = 70
+                xl_img.height = 70
                 ws_comp.add_image(xl_img, f"K{row_idx}")
             except Exception:
                 ws_comp.cell(row=row_idx, column=11, value="[Image Error]")
@@ -295,6 +292,8 @@ def generate_excel_with_images(comp_rows, paid_rows, raw_df):
             try:
                 img_bytes = BytesIO(image_cache[img_url])
                 xl_img = OpenPyxlImage(img_bytes)
+                xl_img.width = 70
+                xl_img.height = 70
                 ws_paid.add_image(xl_img, f"E{row_idx}")
             except Exception:
                 ws_paid.cell(row=row_idx, column=5, value="[Image Error]")
@@ -321,21 +320,15 @@ def generate_pptx_report(paid_rows):
     prs.slide_height = Inches(7.5)
     blank_slide_layout = prs.slide_layouts[6]
     
-    # Pre-fetch Images for Paid Assets
     all_urls = [item.get("image_url") for item in paid_rows if item.get("image_url")]
     image_cache = fetch_all_images_parallel(all_urls)
     
-    # Custom Palette Extracted from PPTX Template 2 (Strictly No Red)
-    DARK_NAVY = RGBColor(15, 23, 42)      # Primary Header & Text (#0F172A)
-    SLATE_MUTED = RGBColor(100, 116, 139) # Secondary Details (#64748B)
+    DARK_NAVY = RGBColor(15, 23, 42)      
+    SLATE_MUTED = RGBColor(100, 116, 139) 
     WHITE = RGBColor(255, 255, 255)
 
-    # ----------------------------------------------------
-    # SLIDE 1: TITLE SLIDE (Matching Slide 1 in Template 2)
-    # ----------------------------------------------------
+    # SLIDE 1: TITLE SLIDE
     slide_title = prs.slides.add_slide(blank_slide_layout)
-    
-    # Clean Title Text Box
     tb_title = slide_title.shapes.add_textbox(Inches(0.8), Inches(2.5), Inches(11.733), Inches(3.0))
     tf_title = tb_title.text_frame
     tf_title.word_wrap = True
@@ -353,15 +346,12 @@ def generate_pptx_report(paid_rows):
     p2.font.color.rgb = SLATE_MUTED
     p2.font.name = "Arial"
 
-    # Bottom Dark Accent Bar
     bottom_bar = slide_title.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(6.8), Inches(13.333), Inches(0.7))
     bottom_bar.fill.solid()
     bottom_bar.fill.fore_color.rgb = DARK_NAVY
     bottom_bar.line.color.rgb = DARK_NAVY
 
-    # ----------------------------------------------------
-    # SLIDE 2+: PAID ASSET PHOTO GRID SLIDES (Matching Template 2x2 Grid)
-    # ----------------------------------------------------
+    # SLIDE 2+: GRID SLIDES
     items_with_images = [item for item in paid_rows if item.get("image_url") in image_cache]
     if not items_with_images:
         items_with_images = paid_rows
@@ -369,16 +359,15 @@ def generate_pptx_report(paid_rows):
     chunks = [items_with_images[i:i + 4] for i in range(0, len(items_with_images), 4)]
     
     grid_positions = [
-        {"left": Inches(0.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   # Top Left
-        {"left": Inches(6.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   # Top Right
-        {"left": Inches(0.8), "top": Inches(4.3), "width": Inches(5.6), "height": Inches(2.7)},   # Bottom Left
-        {"left": Inches(6.8), "top": Inches(4.3), "width": Inches(5.6), "height": Inches(2.7)}    # Bottom Right
+        {"left": Inches(0.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   
+        {"left": Inches(6.8), "top": Inches(1.3), "width": Inches(5.6), "height": Inches(2.7)},   
+        {"left": Inches(0.8), "top": Inches(4.3), "width": Inches(5.6), "height": Inches(2.7)},   
+        {"left": Inches(6.8), "top": Inches(4.3), "width": Inches(5.6), "height": Inches(2.7)}    
     ]
 
     for slide_num, chunk in enumerate(chunks, start=1):
         slide = prs.slides.add_slide(blank_slide_layout)
         
-        # Header Text Matching Template 2
         tb_hdr = slide.shapes.add_textbox(Inches(0.8), Inches(0.3), Inches(11.733), Inches(0.8))
         tf_hdr = tb_hdr.text_frame
         p_hdr = tf_hdr.paragraphs[0]
@@ -399,7 +388,6 @@ def generate_pptx_report(paid_rows):
                 except Exception:
                     pass
             
-            # Muted Overlay Label at bottom of image
             bg_rect = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, pos["left"], pos["top"] + pos["height"] - Inches(0.4), pos["width"], Inches(0.4))
             bg_rect.fill.solid()
             bg_rect.fill.fore_color.rgb = DARK_NAVY
@@ -455,22 +443,18 @@ except Exception as e:
     st.error(f"Failed to load live data: {e}")
     st.stop()
 
-# --- 3. SIDEBAR FILTERS ---
-st.sidebar.title("📅 Date")
+# --- 3. SIDEBAR FILTERS (UPDATED TO STACKED RANGE AS IN SCREENSHOT) ---
+st.sidebar.markdown("### Date")
 
 valid_dates = df['Parsed_Date'].dropna() if 'Parsed_Date' in df.columns else pd.Series()
 if not valid_dates.empty:
-    min_date = valid_dates.min().date()
-    max_date = valid_dates.max().date()
+    min_d = valid_dates.min().date()
+    max_d = valid_dates.max().date()
     
-    date_range = st.sidebar.date_input(
-        "Select Date Range",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
+    start_d = st.sidebar.date_input("Start Date", value=min_d, min_value=min_d, max_value=max_d, key="start_date_picker")
+    end_d = st.sidebar.date_input("End Date", value=max_d, min_value=min_d, max_value=max_d, key="end_date_picker")
 else:
-    date_range = None
+    start_d, end_d = None, None
 
 st.sidebar.divider()
 
@@ -505,11 +489,10 @@ if 'Type Outlet Name' in df.columns:
     if selected_outlets:
         filtered_df = filtered_df[filtered_df['Type Outlet Name'].isin(selected_outlets)]
 
-if date_range and isinstance(date_range, tuple) and len(date_range) == 2 and not valid_dates.empty:
-    start_date, end_date = date_range
+if start_d and end_d and not valid_dates.empty:
     filtered_df = filtered_df[
-        (filtered_df['Parsed_Date'].dt.date >= start_date) & 
-        (filtered_df['Parsed_Date'].dt.date <= end_date)
+        (filtered_df['Parsed_Date'].dt.date >= start_d) & 
+        (filtered_df['Parsed_Date'].dt.date <= end_d)
     ]
 
 st.sidebar.divider()
