@@ -166,105 +166,264 @@ div[data-testid="stDataFrame"] { border: 1px solid var(--border); border-radius:
 
 
 # --- TEXT & PRICE PARSING ---
-def parse_price_discounts(text, submission_date=None):
-    if not isinstance(text, str) or pd.isna(text):
-        return []
+MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+MAX_VALID_DEPTH = 70.0
+MIN_VALID_PRICE = 10.0
 
-    parsed_items = []
-    current_year = datetime.now().year
+_NUM_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2})\s*[/\-.]\s*(\d{1,2})(?:\s*[/\-.]\s*(\d{1,4}))?(?![\d])")
+_TXT_DATE_RE = re.compile(r"(?<![\d])(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:of\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:\s*,?\s*(\d{2,4}))?", re.I)
+_PACK_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*\+\s*\d+(?:\s*(?:pk|pack|packs|pcs|s)\b)?"
+    r"|\d+\s*[*x×]\s*\d+(?:\.\d+)?\s*(?:m|cm|mm|g|kg|ml)?\b"
+    r"|\b[x×]\s*\d+\b"
+    r"|\d+\s*/\s*\d+\s*(?:g|gm|ml|kg|l)\b"
+    r"|\d+(?:\.\d+)?\s*['’]?\s*(?:pk|pks|ppk|pck|pack|packs|ack|pkt|pcs|pc|pieces|rolls?|sheets?|ply|s|g|gm|gms|grams?|kg|kgs|ml|mls|l|ltr|ltrs|litres?|liters?|cm|mm|m|in1|in\s*1|ct|count|sachets?|bags?|wipes|tabs|tablets|caps|k)\b"
+    r"|\d+\s*\*",
+    re.I,
+)
+_WAS_RE = r"(?:was|from|frm|fr|fro|rrp|before|normal(?:ly)?|initial(?:ly)?|regular|usual(?:ly)?|old\s*price)"
+_NOW_RE = r"(?:@|at|now|mow|nw|selling(?:\s*at)?|offer(?:\s*price)?|promo(?:\s*price)?|price|retailing(?:\s*at)?|going\s*for|to)"
+_TOKEN_RE = re.compile(
+    rf"(?P<was>\b{_WAS_RE}\b\s*[:\-]?)|(?P<now>(?:@|\b{_NOW_RE}\b)\s*[:\-]?)|(?P<num>\d[\d,]*(?:\.\d+)?)|(?P<word>[A-Za-z§][\w§'’&.]*)",
+    re.I,
+)
+_FILLER = {
+    "ksh", "kshs", "kes", "sh", "shs", "bob", "only", "each", "per", "offer", "offers", "ends", "end", "ending", "date", "dates",
+    "on", "till", "until", "valid", "promo", "discount", "off", "for", "are",
+    "while", "stocks", "stock", "last", "lasts", "wsl", "ksh.", "sh.", "selling", "it", "a", "price", "prices", "down",
+    "reduced", "reduction", "start", "starts", "started", "starting", "e.g", "eg", "was", "now", "save", "saving",
+    "savings", "new", "price:", "rsp", "untill", "untl", "unti", "stock's", "stocks'", "data", "white", "endsaug",
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "january", "february",
+    "march", "april", "june", "july", "august", "september", "october", "november", "december",
+}
 
-    for line in re.split(r"[\r\n]+", text):
-        line_clean = line.strip("-* ").strip()
-        if not line_clean:
+
+def _mask_packs(text):
+    keep = []
+
+    def sub(m):
+        keep.append(m.group(0))
+        return f" §{len(keep) - 1}§ "
+
+    return _PACK_RE.sub(sub, text), keep
+
+
+def _unmask(text, keep):
+    return re.sub(r"§(\d+)§", lambda m: keep[int(m.group(1))], text)
+
+
+def _to_date(day, month, year, ref):
+    """Build a plausible offer date; fixes missing or mistyped years using the submission date."""
+    try:
+        day, month = int(day), int(month)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    ref = ref if isinstance(ref, (pd.Timestamp, datetime)) and pd.notna(ref) else pd.Timestamp(datetime.now())
+    ref = pd.Timestamp(ref).normalize()
+    cands = []
+    y = str(year).strip() if year not in (None, "") else ""
+    if len(y) == 4 and y.isdigit():
+        cands.append(int(y))
+    elif len(y) == 2 and y.isdigit():
+        cands.append(2000 + int(y))
+    cands += [ref.year, ref.year + 1]
+    for yr in cands:
+        last_day = pd.Timestamp(year=yr, month=month, day=1).days_in_month
+        d = pd.Timestamp(year=yr, month=month, day=min(day, last_day))
+        if ref - pd.Timedelta(days=1) <= d <= ref + pd.Timedelta(days=183):
+            return d
+    return None
+
+
+def _extract_dates(text, ref):
+    """Remove dates from text; return (clean_text, [dates], while_stocks_last)."""
+    found = []
+    wsl = bool(re.search(r"\bwsl\b|while\s*stocks?\s*last", text, re.I))
+
+    def num_sub(m):
+        d = _to_date(m.group(1), m.group(2), m.group(3), ref)
+        if d is not None:
+            found.append(d)
+        return " "
+
+    def txt_sub(m):
+        d = _to_date(m.group(1), MONTHS[m.group(2).lower()[:3]], m.group(3), ref)
+        if d is not None:
+            found.append(d)
+        return " "
+
+    text = _TXT_DATE_RE.sub(txt_sub, text)
+    text = _NUM_DATE_RE.sub(num_sub, text)
+    text = re.sub(r"(?i)\b(?:save|saving|savings)\s*(?:ksh\.?|kes|sh)?\s*\d[\d,]*(?:\.\d+)?\s*/?-?", " ", text)
+    text = re.sub(r"(?i)(?<![\d])\d{1,2}\s*(?:st|nd|rd|th)\b", " ", text)
+    text = re.sub(r"\(\s*\)|\(\s*$|^\s*\)", " ", text)
+    return text, found, wsl
+
+
+def _num(s):
+    try:
+        return float(s.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _resolve(item):
+    """Turn collected was/now/bare numbers into prices and a validity flag."""
+    was, now, bare = item["was"], item["now"], item["bare"]
+    if len(now) >= 2 and not was:
+        was, now = [max(now)], [min(now)]
+    if not was and now and bare:
+        was = [b for b in bare if b > now[0]][:1]
+    if was and not now and bare:
+        now = [b for b in bare if b < was[0]][:1]
+    if not was and not now and len(bare) >= 2:
+        a, b = bare[0], bare[1]
+        was, now = [max(a, b)], [min(a, b)]
+    if not was and not now and len(bare) == 1:
+        now = bare[:1]
+    old_p = was[0] if was else None
+    new_p = now[0] if now else None
+    status, reason = "no_price", "No price captured"
+    if new_p is not None and old_p is None:
+        status, reason = "single", "Promo price only (no original price)"
+    elif old_p is not None and new_p is None:
+        status, reason = "single", "Original price only (no promo price)"
+    elif old_p is not None and new_p is not None:
+        if new_p >= old_p:
+            status, reason = "review", "Promo price is not lower than original price"
+        elif new_p < MIN_VALID_PRICE:
+            status, reason = "review", f"Promo price below KSh {MIN_VALID_PRICE:.0f}"
+        elif (old_p - new_p) / old_p * 100 > MAX_VALID_DEPTH:
+            status, reason = "review", f"Depth above {MAX_VALID_DEPTH:.0f}% — likely a typing error"
+        else:
+            status, reason = "ok", ""
+    return old_p, new_p, status, reason
+
+
+def _parse_line(line):
+    """Split one cleaned line into product items with raw price numbers."""
+    masked, keep = _mask_packs(line)
+    masked = re.sub(r"(\d)([A-Za-z@])", r"\1 \2", masked)
+    masked = re.sub(r"([A-Za-z@:])(\d)", r"\1 \2", masked)
+    items, cur, pending = [], None, None
+
+    def new_item():
+        return {"words": [], "was": [], "now": [], "bare": []}
+
+    cur = new_item()
+    for m in _TOKEN_RE.finditer(masked):
+        kind = m.lastgroup
+        tok = m.group(0)
+        if kind == "word":
+            w = tok.lower().strip(".")
+            if w in _FILLER:
+                continue
+            has_price = bool(cur["was"] or cur["now"] or cur["bare"])
+            if has_price:
+                items.append(cur)
+                cur = new_item()
+            cur["words"].append(tok)
+            pending = None
+        elif kind == "was":
+            pending = "was"
+        elif kind == "now":
+            if tok.strip().lower().startswith("to") and not (cur["was"] or cur["now"]):
+                pending = None
+                continue
+            pending = "now"
+        elif kind == "num":
+            v = _num(tok)
+            if v is None:
+                continue
+            if pending == "was":
+                cur["was"].append(v)
+            elif pending == "now":
+                cur["now"].append(v)
+            else:
+                cur["bare"].append(v)
+            pending = None
+    items.append(cur)
+    out, seen_price = [], False
+    for it in items:
+        has_num = bool(it["was"] or it["now"] or it["bare"])
+        if seen_price and not has_num:
             continue
+        seen_price = seen_price or has_num
+        words = list(it["words"])
+        if it["was"] and it["now"] and it["bare"]:
+            words += [f"{v:g}" for v in it["bare"]]
+            it["bare"] = []
+        name = _unmask(" ".join(words), keep)
+        name = re.sub(r"\s+", " ", name).strip(" -_*•:;,.@/()")
+        it["product"] = name
+        if name or it["was"] or it["now"] or it["bare"]:
+            out.append(it)
+    return out
 
-        start_date_str = None
-        end_date_str = None
-        duration_days = None
 
-        range_match = re.search(r'(?:from\s*|start\s*)?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s*(?:to|-|until|–)\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
-
-        if range_match:
-            start_date_str = range_match.group(1).strip()
-            end_date_str = range_match.group(2).strip()
-            line_clean = re.sub(r'(?:from\s*|start\s*)?\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*(?:to|-|until|–)\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
-        else:
-            start_match = re.search(r'(?:start\s*date\s*|start\s*|from\s*)(\d{1,2}/\d{1,2}(?:/\d{2,4})?)', line_clean, re.IGNORECASE)
-            if start_match:
-                start_date_str = start_match.group(1).strip()
-                line_clean = re.sub(r'(?:start\s*date\s*|start\s*|from\s*)\d{1,2}/\d{1,2}(?:/\d{2,4})?', '', line_clean, flags=re.IGNORECASE).strip()
-
-            end_match = re.search(r'(?:end\s*date\s*|ends\s*|\()(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\)?', line_clean, re.IGNORECASE)
-            if end_match:
-                end_date_str = end_match.group(1).strip()
-                line_clean = re.sub(r'(?:end\s*date\s*|ends\s*|\()?\d{1,2}/\d{1,2}(?:/\d{2,4})?\)?', '', line_clean, flags=re.IGNORECASE).strip()
-
-        if not start_date_str and submission_date is not None:
-            if isinstance(submission_date, (pd.Timestamp, datetime)) and pd.notna(submission_date):
-                start_date_str = submission_date.strftime("%d/%m/%Y")
-
-        def parse_to_date(d_str):
-            if not d_str:
-                return None
-            parts = str(d_str).split('/')
-            if len(parts) == 2:
-                d_str = f"{d_str}/{current_year}"
-            elif len(parts) == 3 and len(parts[2]) == 2:
-                parts[2] = f"20{parts[2]}"
-                d_str = "/".join(parts)
-            try:
-                return datetime.strptime(d_str, "%d/%m/%Y").date()
-            except Exception:
-                return None
-
-        d_start = parse_to_date(start_date_str)
-        d_end = parse_to_date(end_date_str)
-        if d_start and d_end and d_end >= d_start:
-            duration_days = (d_end - d_start).days + 1
-
-        found = False
-        old_price, new_price, product = None, None, line_clean
-
-        m1 = re.search(r"(.+?)(?:@|now\s*|KSh\s*)?\s*(\d+(?:\.\d+)?)\s*(?:from|was)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
-        m2 = re.search(r"(.+?)(?:was|from)\s*(?:KSh\s*)?(\d+(?:\.\d+)?)\s*(?:now|@|to|mow|KSh)?\s*(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
-        m3 = re.search(r"(.+?)(?:KSh\s*)?(\d+(?:\.\d+)?)\s*[\-/]\s*(?:KSh\s*)?(\d+(?:\.\d+)?)", line_clean, re.IGNORECASE)
-
-        if m1:
-            product = m1.group(1).strip()
-            new_price = float(m1.group(2))
-            old_price = float(m1.group(3))
-            found = True
-        elif m2:
-            product = m2.group(1).strip()
-            old_price = float(m2.group(2))
-            new_price = float(m2.group(3))
-            found = True
-        elif m3:
-            product = m3.group(1).strip()
-            p1, p2 = float(m3.group(2)), float(m3.group(3))
-            if p1 > p2:
-                old_price, new_price = p1, p2
-                found = True
-
-        product = product.rstrip("@:;- ").strip()
-
-        if found and old_price and new_price and old_price > new_price:
-            discount_amount = old_price - new_price
-            parsed_items.append({
-                "product": product, "old_price": old_price, "new_price": new_price,
-                "discount_amount": discount_amount, "discount_pct": discount_amount / old_price * 100,
-                "start_date": start_date_str, "end_date": end_date_str, "duration_days": duration_days,
-                "raw_line": line_clean,
+def parse_price_discounts(text, submission_date=None):
+    """Parse a rep's free-text competitor note into promo lines with validated prices and offer end dates."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    ref = submission_date if isinstance(submission_date, (pd.Timestamp, datetime)) and pd.notna(submission_date) else None
+    results = []
+    for raw in re.split(r"[\r\n]+|(?<=\))\s*[,;]\s*|\s*;\s*", text):
+        raw_clean = raw.strip().strip("-*•_ ").strip()
+        if not raw_clean:
+            continue
+        body, dates, wsl = _extract_dates(raw_clean, ref)
+        items = _parse_line(body)
+        end_date = max(dates) if dates else None
+        if not items:
+            if end_date is not None:
+                for prev in reversed(results):
+                    if prev["end_date"] is None:
+                        prev["end_date"] = end_date
+                    else:
+                        break
+            continue
+        for it in items:
+            only_prices = not it["product"]
+            target = None
+            if only_prices and results:
+                prev = results[-1]
+                needs = (it["was"] and prev["_was"] == []) or (it["now"] and prev["_now"] == []) or (it["bare"] and not (prev["_was"] and prev["_now"]))
+                if needs:
+                    target = prev
+            if target is not None:
+                target["_was"] += it["was"]
+                target["_now"] += it["now"]
+                target["_bare"] += it["bare"]
+                if end_date is not None and target["end_date"] is None:
+                    target["end_date"] = end_date
+                continue
+            if only_prices:
+                continue
+            results.append({
+                "product": it["product"], "_was": list(it["was"]), "_now": list(it["now"]),
+                "_bare": list(it["bare"]), "end_date": end_date, "wsl": wsl, "raw_line": raw_clean,
             })
-        else:
-            parsed_items.append({
-                "product": line_clean, "old_price": None, "new_price": None,
-                "discount_amount": None, "discount_pct": None,
-                "start_date": start_date_str, "end_date": end_date_str, "duration_days": duration_days,
-                "raw_line": line_clean,
-            })
-
-    return parsed_items
+    out = []
+    for r in results:
+        old_p, new_p, status, reason = _resolve({"was": r["_was"], "now": r["_now"], "bare": r["_bare"]})
+        valid = status == "ok"
+        disc = (old_p - new_p) if valid else None
+        end = r["end_date"]
+        duration = None
+        if end is not None and ref is not None:
+            duration = int((end - pd.Timestamp(ref).normalize()).days) + 1
+            if duration < 1:
+                duration = None
+        out.append({
+            "product": r["product"], "old_price": old_p, "new_price": new_p,
+            "discount_amount": disc, "discount_pct": (disc / old_p * 100) if valid else None,
+            "start_date": pd.Timestamp(ref).strftime("%d/%m/%Y") if ref is not None else None,
+            "end_date": end.strftime("%d/%m/%Y") if end is not None else ("While stocks last" if r["wsl"] else None),
+            "end_ts": end, "duration_days": duration, "status": status, "reason": reason, "raw_line": r["raw_line"],
+        })
+    return out
 
 
 # --- PHOTO LINKS ---
@@ -529,16 +688,16 @@ def generate_excel_report(ctx):
     ws.freeze_panes = "A4"
 
     # Competitor price cuts (all parsed lines)
-    if len(promo):
-        comp_tbl = promo.assign(**{"Depth": promo["Depth %"] / 100}).sort_values("Date", ascending=False)[
-            ["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Duration (days)", "Photo"]]
+    comp_cols = ["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Days Left", "Photo"]
+    if len(priced):
+        comp_tbl = priced.assign(**{"Depth": priced["Depth %"] / 100}).sort_values("Date", ascending=False)[comp_cols]
     else:
-        comp_tbl = pd.DataFrame(columns=["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Duration (days)", "Photo"])
+        comp_tbl = pd.DataFrame(columns=comp_cols)
     ws_c, hr = _xl_data_sheet(
         wb, "Competitor Price Cuts", comp_tbl,
-        {"Date": "dd mmm yyyy", "Was (KSh)": "#,##0", "Now (KSh)": "#,##0", "Saving (KSh)": "#,##0", "Depth": "0.0%", "Duration (days)": "0"},
+        {"Date": "dd mmm yyyy", "Was (KSh)": "#,##0", "Now (KSh)": "#,##0", "Saving (KSh)": "#,##0", "Depth": "0.0%", "Days Left": "0"},
         {"Date": 13, "Project": 9, "Outlet": 24, "Field Rep": 26, "Brand": 13, "Product": 38, "Was (KSh)": 11, "Now (KSh)": 11,
-         "Saving (KSh)": 12, "Depth": 10, "Ends": 11, "Duration (days)": 14, "Photo": 12},
+         "Saving (KSh)": 12, "Depth": 10, "Ends": 13, "Days Left": 10, "Photo": 12},
         link_cols=("Photo",), meta_line=meta_line,
     )
     if len(comp_tbl):
@@ -1058,17 +1217,24 @@ def promo_list_html(items):
     lis = []
     for it in items:
         extras = ""
-        if it.get("end_date"):
-            extras += f"<span class='badge badge-muted'>Ends {esc(it['end_date'])}</span>"
+        if it.get("end_ts") is not None:
+            extras += f"<span class='badge badge-muted'>Ends {it['end_ts'].strftime('%d %b %Y')}</span>"
+        elif it.get("end_date"):
+            extras += f"<span class='badge badge-muted'>{esc(it['end_date'])}</span>"
         if it.get("duration_days"):
-            extras += f"<span class='badge badge-muted'>{it['duration_days']} days</span>"
-        if it.get("discount_amount"):
+            extras += f"<span class='badge badge-muted'>{it['duration_days']} days left</span>"
+        if it.get("status") == "ok":
             lis.append(
                 f"<li><span class='p-name'>{esc(it['product'])}</span>"
                 f"<span class='p-now'>KSh {it['new_price']:,.0f}</span>"
                 f"<span class='p-was'>KSh {it['old_price']:,.0f}</span>"
                 f"<span class='badge badge-red'>−{it['discount_pct']:.1f}% · KSh {it['discount_amount']:,.0f}</span>{extras}</li>"
             )
+        elif it.get("status") == "single" and (it.get("new_price") or it.get("old_price")):
+            price = it.get("new_price") or it.get("old_price")
+            lis.append(f"<li><span class='p-name'>{esc(it['product'])}</span><span class='p-now'>KSh {price:,.0f}</span>{extras}</li>")
+        elif it.get("status") == "review":
+            lis.append(f"<li>{esc(it['raw_line'])}<span class='badge badge-amber'>check: {esc(it['reason'])}</span>{extras}</li>")
         else:
             lis.append(f"<li>{esc(it['raw_line'])}{extras}</li>")
     return f"<ul class='promo-list'>{''.join(lis)}</ul>"
@@ -1101,7 +1267,19 @@ def unique_assets(src_df, type_col, default_label):
     return agg.sort_values("Last Seen", ascending=False, na_position="last").reset_index(drop=True)
 
 
+BRAND_ALIASES = {
+    "soft leaf": "Softleaf", "soft leave": "Softleaf", "softleaf": "Softleaf", "pure haven": "Pure Haven", "pure havens": "Pure Haven",
+    "haven": "Pure Haven", "fields of africa": "Fields Of Africa", "tishu poa": "Tishu Poa", "quick choice": "Quickchoice",
+    "quickchoice": "Quickchoice", "hanaa": "Hanan", "hanna": "Hanan", "statwrapp": "Statwrap", "posy": "Poshy", "petals": "Celine",
+    "celine petals": "Celine", "floral": "Flora", "santa maria": "Santa Maria",
+}
+
+
 def brand_of(product):
+    text = re.sub(r"[^a-z' ]+", " ", str(product).lower()).strip()
+    for alias in sorted(BRAND_ALIASES, key=len, reverse=True):
+        if text == alias or text.startswith(alias + " "):
+            return BRAND_ALIASES[alias]
     words = re.findall(r"[A-Za-z][A-Za-z'&]*", str(product))
     return words[0].title() if words else "Other"
 
@@ -1179,11 +1357,13 @@ for idx, row in comp_df.iterrows():
             "Field Rep": row["Select Your Name"], "Product": it["product"],
             "Was (KSh)": it["old_price"], "Now (KSh)": it["new_price"],
             "Depth %": round(it["discount_pct"], 1) if it["discount_pct"] else None,
-            "Saving (KSh)": it["discount_amount"], "Ends": it["end_date"], "Duration (days)": it["duration_days"],
+            "Saving (KSh)": it["discount_amount"],
+            "Ends": (it["end_ts"].strftime("%d %b %Y") if it.get("end_ts") is not None else (it["end_date"] or "")),
+            "Days Left": it["duration_days"], "Status": it["status"], "Check": it["reason"], "Note": it["raw_line"],
             "Brand": brand_of(it["product"]), "Photo": img_src(first_photo) if first_photo else None,
         })
 promo_df = pd.DataFrame(promo_records)
-priced_promos = promo_df[promo_df["Depth %"].notna()].copy() if not promo_df.empty else promo_df
+priced_promos = promo_df[promo_df["Status"] == "ok"].copy() if not promo_df.empty else promo_df
 
 PAID_DEFAULT = "Paid Asset (Type Not Recorded)"
 UNPAID_DEFAULT = "Unpaid Asset (Type Not Recorded)"
@@ -1336,7 +1516,7 @@ with tab_comp:
             st.info("No priced competitor promotions captured for the selected filters.")
         else:
             table_cols = ["Date", "Outlet", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Depth %", "Saving (KSh)",
-                          "Ends", "Duration (days)", "Project", "Field Rep"]
+                          "Ends", "Days Left", "Project", "Field Rep"]
             st.dataframe(
                 priced_promos.sort_values("Date", ascending=False)[table_cols], hide_index=True, use_container_width=True,
                 height=min(600, 38 + 35 * len(priced_promos)),
@@ -1346,15 +1526,17 @@ with tab_comp:
                     "Now (KSh)": st.column_config.NumberColumn("Now (KSh)", format="%,.0f"),
                     "Saving (KSh)": st.column_config.NumberColumn("Saving (KSh)", format="%,.0f"),
                     "Depth %": st.column_config.NumberColumn("Depth %", format="%.1f%%"),
-                    "Duration (days)": st.column_config.NumberColumn("Duration (days)", format="%d"),
+                    "Days Left": st.column_config.NumberColumn("Days Left", format="%d", help="Days from the visit to the offer end date"),
                 },
             )
-            unpriced = promo_df[promo_df["Depth %"].isna()] if not promo_df.empty else promo_df
+            unpriced = promo_df[promo_df["Status"] != "ok"] if not promo_df.empty else promo_df
             if not unpriced.empty:
-                with st.expander(f"Notes without a readable price ({len(unpriced):,})"):
-                    st.dataframe(unpriced[["Date", "Project", "Outlet", "Field Rep", "Product", "Ends"]].rename(columns={"Product": "Note"}),
+                with st.expander(f"Lines not counted as price cuts ({len(unpriced):,}) — single prices, typos and notes"):
+                    st.dataframe(unpriced[["Date", "Outlet", "Field Rep", "Note", "Was (KSh)", "Now (KSh)", "Check"]],
                                  hide_index=True, use_container_width=True,
-                                 column_config={"Date": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY")})
+                                 column_config={"Date": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY"),
+                                                "Was (KSh)": st.column_config.NumberColumn("Was (KSh)", format="%,.0f"),
+                                                "Now (KSh)": st.column_config.NumberColumn("Now (KSh)", format="%,.0f")})
 
 # ==========================================
 # PAID & UNPAID ASSETS
