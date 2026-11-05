@@ -449,14 +449,95 @@ def generate_pptx_report(paid_rows):
     ppt_output.seek(0)
     return ppt_output.getvalue()
 
+# --- GOOGLE DRIVE PHOTO LINKS ---
+def drive_display_url(url):
+    """Convert a Google Drive file link into a thumbnail link that renders in <img> tags and downloads reliably."""
+    url = str(url).strip()
+    m = re.search(r"(?:[?&]id=|/file/d/|/open\?id=)([A-Za-z0-9_-]{10,})", url)
+    if "drive.google.com" in url and m:
+        return f"https://drive.google.com/thumbnail?id={m.group(1)}&sz=w1200"
+    return url
+
+def split_urls(val):
+    """Split a cell holding one or many photo links (newline or comma separated)."""
+    if pd.isna(val) or str(val).strip() in ["", "nan", "None"]:
+        return []
+    return [drive_display_url(u) for u in re.split(r"[\n,]+", str(val)) if u.strip().lower().startswith("http")]
+
+def _find_col(df, *candidates):
+    lower_map = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in lower_map:
+            return lower_map[cand.lower()]
+    return None
+
+def _clean_text(val):
+    if pd.isna(val):
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() in ["", "nan", "none", "no", "nil", "n/a", "na"] else s
+
+def normalize_new_sheet(df):
+    """Map the 'COMPETITORACTIVITES AND PAID ASSETS — Responses' sheet onto the columns the dashboard uses."""
+    out = pd.DataFrame(index=df.index)
+
+    ts_col = next((c for c in df.columns if c.lower().startswith("submission timestamp")), None) or _find_col(df, "Submission Date", "Timestamp")
+    out["Submission Date"] = df[ts_col] if ts_col else None
+
+    proj_col = _find_col(df, "SELECT YOUR PROJECT")
+    out["Select Your Project"] = df[proj_col].astype(str).str.strip().replace({"nan": None, "": None}) if proj_col else None
+
+    name_cols = [c for c in df.columns if c.lower().startswith("select your name")]
+    names = pd.Series([None] * len(df), index=df.index, dtype=object)
+    for c in name_cols:
+        vals = df[c].where(df[c].notna() & (df[c].astype(str).str.strip() != ""))
+        names = names.fillna(vals)
+    out["Select Your Name"] = names.astype(object).where(names.notna(), None)
+    out["Select Your Name"] = out["Select Your Name"].apply(lambda x: str(x).strip().upper() if x is not None else None)
+
+    outlet_col = _find_col(df, "Type outlet name")
+    out["Type Outlet Name"] = df[outlet_col].fillna("").astype(str).str.strip().replace({"nan": "", "None": ""}).replace("", "Unknown Outlet") if outlet_col else "Unknown Outlet"
+
+    for canon, src in [
+        ("Does the store have any paid assets", "Does the store have any paid assets"),
+        ("Does the store have any unpaid assets", "Does the store have any unpaid assets"),
+        ("Are there any Competitor activities in the outlet", "Are there any Competitor activities in the outlet"),
+    ]:
+        c = _find_col(df, src)
+        out[canon] = df[c] if c else None
+
+    desc_cols = [c for c in df.columns if c.lower().startswith("describe the competitor activities")]
+    def combine_desc(row):
+        parts = [_clean_text(row[c]) for c in desc_cols]
+        return "\n".join([p for p in parts if p]) or None
+    out["Describe the competitor activities"] = df.apply(combine_desc, axis=1) if desc_cols else None
+
+    photo_map = {
+        "Take Photo - Paid Assets": "Take a photo of Paid Assets",
+        "Take Photo - Unpaid Assets": "Take a photo of unpaid Assets",
+        "Take Photo - Competitor Activities": "Take a photo of competitor activities",
+        "Take Photo - Competitor Activities (Others)": "Take a photo of competitor activities (others)",
+    }
+    for canon, src in photo_map.items():
+        c = _find_col(df, src)
+        out[canon] = df[c].apply(lambda v: ", ".join(split_urls(v)) or None) if c else None
+
+    for c in ["Latitude", "Longitude", "Location accuracy (m)", "Location status"]:
+        src = _find_col(df, c)
+        if src:
+            out[c] = df[src]
+
+    return out
+
 # 2. Load Data Function
 @st.cache_data(ttl=300)
 def load_data():
-    CSV_URL = "https://docs.google.com/spreadsheets/d/1XeWdaYVyLdqfgF00nKBOjZ0OlhtcqRHb6HO0b1lND0Y/export?format=csv&gid=284416453"
+    CSV_URL = "https://docs.google.com/spreadsheets/d/1_k43t4QFDvDpisgFLs1lRykzOdIA4F_AC045SX-u78A/export?format=csv&gid=433581189"
     df = pd.read_csv(CSV_URL)
     df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
-    
+    df = normalize_new_sheet(df)
+
     date_col = "Submission Date" if "Submission Date" in df.columns else None
     if not date_col:
         for c in df.columns:
@@ -538,7 +619,7 @@ if start_d and end_d and not valid_dates.empty:
     ]
 
 st.sidebar.divider()
-st.sidebar.caption("⚡ Live sync active (Google Sheets & Jotform API)")
+st.sidebar.caption("⚡ Live sync active (Google Sheets)")
 
 # --- DASHBOARD HEADER & HIGH-LEVEL METRICS ---
 st.title("📊 Competitor Activities and Paid Assets")
@@ -547,20 +628,23 @@ total_submissions = len(filtered_df)
 paid_col = "Does the store have any paid assets"
 comp_col = "Are there any Competitor activities in the outlet"
 
+unpaid_col = "Does the store have any unpaid assets"
 paid_assets_count = (filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"].shape[0] if paid_col in filtered_df.columns else 0)
+unpaid_assets_count = (filtered_df[filtered_df[unpaid_col].astype(str).str.strip().str.lower() == "yes"].shape[0] if unpaid_col in filtered_df.columns else 0)
 comp_activities_count = (filtered_df[filtered_df[comp_col].astype(str).str.strip().str.lower() == "yes"].shape[0] if comp_col in filtered_df.columns else 0)
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Submissions", total_submissions)
 col2.metric("Outlets with Paid Assets", paid_assets_count)
-col3.metric("Competitor Activities Reported", comp_activities_count)
+col3.metric("Outlets with Unpaid Assets", unpaid_assets_count)
+col4.metric("Competitor Activities Reported", comp_activities_count)
 
 st.divider()
 
 # --- PRE-PROCESS EXPORT ROWS ---
 all_image_columns = [col for col in filtered_df.columns if "Take Photo" in str(col)]
 comp_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
-paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
+paid_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower() and "unpaid" not in str(c).lower()]
 desc_col = "Describe the competitor activities"
 asset_select_col = "Select Paid assets in the outlet"
 
@@ -608,7 +692,7 @@ if comp_col in filtered_df.columns and desc_col in filtered_df.columns:
             })
 
 global_paid_rows = []
-if paid_col in filtered_df.columns and asset_select_col in filtered_df.columns:
+if paid_col in filtered_df.columns:
     paid_df_export = filtered_df[filtered_df[paid_col].astype(str).str.strip().str.lower() == "yes"]
     for _, row in paid_df_export.iterrows():
         outlet = row.get("Type Outlet Name", "Unknown Outlet")
@@ -656,6 +740,34 @@ with nav_tab1:
                 st.dataframe(asset_counts, hide_index=True, use_container_width=True)
         else:
             st.info("No paid assets recorded for the selected filters.")
+    else:
+        def _yes_count(s):
+            return (s.astype(str).str.strip().str.lower() == "yes").sum()
+        group_col = "Select Your Project" if "Select Your Project" in filtered_df.columns else None
+        if group_col and not filtered_df.empty:
+            summary_df = filtered_df.assign(**{group_col: filtered_df[group_col].fillna("Unassigned")}).groupby(group_col).agg(
+                Submissions=(group_col, "size"),
+                **{"Paid Assets": (paid_col, _yes_count),
+                   "Unpaid Assets": (unpaid_col, _yes_count),
+                   "Competitor Activities": (comp_col, _yes_count)}
+            ).reset_index().rename(columns={group_col: "Project"})
+            col_chart, col_data = st.columns([2, 1])
+            with col_chart:
+                st.bar_chart(summary_df.set_index("Project")[["Paid Assets", "Unpaid Assets", "Competitor Activities"]])
+            with col_data:
+                st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+            if "Type Outlet Name" in filtered_df.columns:
+                st.markdown("### 🏬 Outlet Breakdown")
+                outlet_df = filtered_df.assign(**{"Type Outlet Name": filtered_df["Type Outlet Name"].fillna("Unknown Outlet")}).groupby("Type Outlet Name").agg(
+                    Submissions=("Type Outlet Name", "size"),
+                    **{"Paid Assets": (paid_col, _yes_count),
+                       "Unpaid Assets": (unpaid_col, _yes_count),
+                       "Competitor Activities": (comp_col, _yes_count)}
+                ).reset_index().rename(columns={"Type Outlet Name": "Outlet"}).sort_values("Submissions", ascending=False)
+                st.dataframe(outlet_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("No submissions for the selected filters.")
 
 # ==========================================
 # PAGE 2: COMPETITOR ACTIVITIES & PAID ASSETS
@@ -845,13 +957,15 @@ with nav_tab3:
     st.markdown("### 📸 Gallery")
     image_type_choice = st.segmented_control(
         "Select Photo Type:",
-        options=["All Images", "Paid Assets", "Competitor Activities"],
+        options=["All Images", "Paid Assets", "Unpaid Assets", "Competitor Activities"],
         default="All Images",
         key="gallery_photo_type"
     )
 
     if image_type_choice == "Paid Assets":
-        active_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower()]
+        active_image_cols = [c for c in all_image_columns if "paid asset" in str(c).lower() and "unpaid" not in str(c).lower()]
+    elif image_type_choice == "Unpaid Assets":
+        active_image_cols = [c for c in all_image_columns if "unpaid" in str(c).lower()]
     elif image_type_choice == "Competitor Activities":
         active_image_cols = [c for c in all_image_columns if "competitor" in str(c).lower()]
     else:
