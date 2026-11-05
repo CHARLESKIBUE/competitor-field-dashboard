@@ -348,7 +348,21 @@ BRAND_CYAN = "00BEF2"
 BRAND_RULE = "CFD8E4"
 BRAND_ZEBRA = "F3F6FA"
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "Smollan_Core_Template.pptx")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def find_template():
+    """Locate the Smollan PowerPoint template in the repo (templates/ folder or the main folder)."""
+    for path in [os.path.join(APP_DIR, "templates", "Smollan_Core_Template.pptx"),
+                 os.path.join(APP_DIR, "Smollan_Core_Template.pptx")]:
+        if os.path.exists(path):
+            return path
+    for folder in [os.path.join(APP_DIR, "templates"), APP_DIR]:
+        if os.path.isdir(folder):
+            for name in sorted(os.listdir(folder)):
+                if name.lower().endswith(".pptx") and "template" in name.lower():
+                    return os.path.join(folder, name)
+    return None
 
 
 def _xl_title_block(ws, title, meta_line, width_cols):
@@ -598,8 +612,9 @@ def _rgb(hexstr):
 
 
 def _template_prs():
-    if os.path.exists(TEMPLATE_PATH):
-        prs = Presentation(TEMPLATE_PATH)
+    template_path = find_template()
+    if template_path:
+        prs = Presentation(template_path)
         sld_ids = prs.slides._sldIdLst
         for sld_id in list(sld_ids):
             prs.part.drop_rel(sld_id.rId)
@@ -653,10 +668,16 @@ def _textbox(slide, left, top, width, height, text, size=12, bold=False, color="
 
 
 def _content_slide(prs, heading, subheading):
-    slide = prs.slides.add_slide(_layout(prs, "Title Slide - ONE LINE + SUB"))
-    _set_ph(slide, 0, heading.upper())
-    _set_ph(slide, 2, subheading)
-    _drop_ph(slide, 1)
+    slide = prs.slides.add_slide(_layout(prs, "Title Slide - ONE LINE + SUB", 6))
+    if _ph(slide, 0) is not None and _ph(slide, 2) is not None:
+        _set_ph(slide, 0, heading.upper())
+        _set_ph(slide, 2, subheading)
+        _drop_ph(slide, 1)
+    else:
+        for ph in list(slide.placeholders):
+            ph._element.getparent().remove(ph._element)
+        _textbox(slide, Inches(0.64), Inches(0.5), Inches(12), Inches(0.5), heading.upper(), 24, True, BRAND_HEAD, "Montserrat")
+        _textbox(slide, Inches(0.64), Inches(1.45), Inches(12), Inches(0.35), subheading, 13, False, BRAND_BLUE, "Montserrat")
     return slide
 
 
@@ -709,7 +730,7 @@ def generate_pptx_report(ctx):
     today = datetime.now().strftime("%d %B %Y")
 
     # Cover
-    cover = prs.slides.add_slide(_layout(prs, "COVER - Shape Dark Blue", 0))
+    cover = prs.slides.add_slide(_layout(prs, "COVER - Shape Dark Blue", 6))
     if has_template:
         _set_ph(cover, 0, "Paid Asset Executions Review")
         _set_ph(cover, 1, f"CHANDARIA {ctx['project_label'].upper()} · FIELD INTELLIGENCE")
@@ -1423,7 +1444,10 @@ with tab_export:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="excel_dl", use_container_width=True, type="primary")
     with e2:
-        st.markdown(f"<div class='card'><div class='card-outlet'>Paid assets deck</div><div class='card-rep'>Smollan template · cover, summary, four photos per slide · {len(paid_unique):,} unique paid assets</div></div>", unsafe_allow_html=True)
+        tpl = find_template()
+        tpl_note = ("<span class='badge badge-green'>Smollan template found</span>" if tpl else
+                    "<span class='badge badge-amber'>Smollan template not found · upload Smollan_Core_Template.pptx to the GitHub repo</span>")
+        st.markdown(f"<div class='card'><div class='card-outlet'>Paid assets deck</div><div class='card-rep'>Cover, summary, four photos per slide · {len(paid_unique):,} unique paid assets</div><div style='margin-top:10px'>{tpl_note}</div></div>", unsafe_allow_html=True)
         if st.button("Build PowerPoint deck", key="ppt_btn", use_container_width=True, disabled=paid_unique.empty):
             with st.spinner("Downloading photos and building the deck…"):
                 ppt_bytes = generate_pptx_report(export_ctx)
