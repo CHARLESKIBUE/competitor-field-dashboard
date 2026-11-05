@@ -1,5 +1,6 @@
 import html
 import math
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -11,11 +12,17 @@ import plotly.express as px
 import requests
 import streamlit as st
 from openpyxl.drawing.image import Image as OpenPyxlImage
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.formatting.rule import DataBarRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from PIL import Image
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE
 from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
 # --- DATA SOURCES ---
@@ -94,7 +101,7 @@ section[data-testid="stSidebar"] .sb-brand-sub { font-size: 0.8rem; color: var(-
 .dash-meta b { color: var(--text); font-weight: 600; }
 
 /* KPI tiles */
-.kpi-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 26px; }
+.kpi-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 26px; }
 @media (max-width: 1200px) { .kpi-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
     border-top: 3px solid var(--kpi-accent, var(--accent)); }
@@ -332,127 +339,492 @@ def fetch_all_images_parallel(urls):
     return url_to_bytes
 
 
-# --- EXCEL EXPORT ---
-def _style_header(ws):
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="0F172A")
-        cell.alignment = Alignment(vertical="center")
-    ws.freeze_panes = "A2"
+# --- REPORT EXPORTS ---
+BRAND_NAVY = "00274E"
+BRAND_HEAD = "005083"
+BRAND_BLUE = "0079C2"
+BRAND_TEAL = "10B895"
+BRAND_CYAN = "00BEF2"
+BRAND_RULE = "CFD8E4"
+BRAND_ZEBRA = "F3F6FA"
+
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "Smollan_Core_Template.pptx")
 
 
-def generate_excel_with_images(comp_rows, paid_rows, raw_df):
+def _xl_title_block(ws, title, meta_line, width_cols):
+    last = get_column_letter(width_cols)
+    ws.merge_cells(f"A1:{last}1")
+    ws["A1"] = title
+    ws["A1"].font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor=BRAND_NAVY)
+    ws["A1"].alignment = Alignment(vertical="center", indent=1)
+    ws.row_dimensions[1].height = 34
+    ws.merge_cells(f"A2:{last}2")
+    ws["A2"] = meta_line
+    ws["A2"].font = Font(name="Calibri", size=10, color="FFFFFF")
+    ws["A2"].fill = PatternFill("solid", fgColor=BRAND_HEAD)
+    ws["A2"].alignment = Alignment(vertical="center", indent=1)
+    ws.row_dimensions[2].height = 20
+    ws.sheet_view.showGridLines = False
+
+
+def _xl_section(ws, row, col, text):
+    c = ws.cell(row=row, column=col, value=text.upper())
+    c.font = Font(name="Calibri", size=11, bold=True, color=BRAND_HEAD)
+    return row + 1
+
+
+def _xl_small_table(ws, row, col, headers, rows, formats=None, text_cols=(0,)):
+    """Write a compact styled table; returns the next free row."""
+    formats = formats or {}
+    thin = Side(style="thin", color=BRAND_RULE)
+    for j, h in enumerate(headers):
+        c = ws.cell(row=row, column=col + j, value=h)
+        c.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=BRAND_NAVY)
+        c.alignment = Alignment(horizontal="left" if j in text_cols else "right", vertical="center", indent=1 if (j in text_cols and j > 0) else 0)
+    for i, r in enumerate(rows, start=1):
+        for j, v in enumerate(r):
+            c = ws.cell(row=row + i, column=col + j, value=v)
+            c.font = Font(name="Calibri", size=10)
+            c.border = Border(bottom=thin)
+            c.alignment = Alignment(horizontal="left" if j in text_cols else "right", indent=1 if (j in text_cols and j > 0) else 0)
+            if i % 2 == 0:
+                c.fill = PatternFill("solid", fgColor=BRAND_ZEBRA)
+            if j in formats:
+                c.number_format = formats[j]
+    return row + len(rows) + 2
+
+
+def _xl_data_sheet(wb, title, df, col_formats, col_widths, link_cols=(), meta_line=""):
+    ws = wb.create_sheet(title=title[:31])
+    ncols = max(len(df.columns), 1)
+    _xl_title_block(ws, title, meta_line, ncols)
+    header_row = 4
+    for j, h in enumerate(df.columns, start=1):
+        c = ws.cell(row=header_row, column=j, value=h)
+        c.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=BRAND_NAVY)
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+    for i, r in enumerate(df.itertuples(index=False), start=header_row + 1):
+        for j, v in enumerate(r, start=1):
+            if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NaT:
+                continue
+            if isinstance(v, pd.Timestamp):
+                v = v.to_pydatetime()
+            c = ws.cell(row=i, column=j)
+            h = df.columns[j - 1]
+            if h in link_cols and isinstance(v, str) and v.startswith("http"):
+                c.value = "View photo"
+                c.hyperlink = v
+                c.font = Font(name="Calibri", size=10, color=BRAND_BLUE, underline="single")
+            else:
+                c.value = v
+                c.font = Font(name="Calibri", size=10)
+            if h in col_formats:
+                c.number_format = col_formats[h]
+    for j, h in enumerate(df.columns, start=1):
+        ws.column_dimensions[get_column_letter(j)].width = col_widths.get(h, 14)
+    last_row = header_row + max(len(df), 1)
+    if len(df):
+        ref = f"A{header_row}:{get_column_letter(ncols)}{last_row}"
+        tbl = Table(displayName=re.sub(r"[^A-Za-z0-9]", "", title)[:30] or "Data", ref=ref)
+        tbl.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+        ws.add_table(tbl)
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+    ws.row_dimensions[header_row].height = 30
+    return ws, header_row
+
+
+def generate_excel_report(ctx):
+    meta_line = ctx["meta_line"]
+    priced, promo, paid_u, unpaid_u = ctx["priced"], ctx["promo"], ctx["paid_unique"], ctx["unpaid_unique"]
+    paid_src, unpaid_src = ctx["paid_df"], ctx["unpaid_df"]
+
     wb = openpyxl.Workbook()
-    all_urls = [item.get("image_url") for item in comp_rows + paid_rows if item.get("image_url")]
-    image_cache = fetch_all_images_parallel(all_urls)
+    ws = wb.active
+    ws.title = "Summary"
+    _xl_title_block(ws, "Competitor Activities & Paid Assets Report", meta_line, 10)
+    for col, w in zip("ABCDEFGHIJ", [32, 13, 13, 11, 14, 24, 12, 12, 12, 12]):
+        ws.column_dimensions[col].width = w
 
-    ws_comp = wb.active
-    ws_comp.title = "Competitor Depth & Activity"
-    ws_comp.append(["Date", "Project", "Outlet", "Field Rep", "Activity", "Was", "Now", "Depth", "Start Date", "Offer End Date", "Promo Duration", "Image"])
-    for row_idx, item in enumerate(comp_rows, start=2):
-        ws_comp.append([
-            item["Date"], item["Project"], item["Outlet"], item["Field Rep"], item["Activity"],
-            item["Was"], item["Now"], item["Depth"], item["Start Date"], item["End Date"], item["Duration Days"], "",
-        ])
-        ws_comp.row_dimensions[row_idx].height = 60
-        img_url = item.get("image_url")
-        if img_url in image_cache:
-            try:
-                xl_img = OpenPyxlImage(BytesIO(image_cache[img_url]))
-                xl_img.width, xl_img.height = 70, 70
-                ws_comp.add_image(xl_img, f"L{row_idx}")
-            except Exception:
-                ws_comp.cell(row=row_idx, column=12, value="[Image Error]")
-        elif img_url:
-            ws_comp.cell(row=row_idx, column=12, value="[Image Unavailable]")
-    for col, width in zip("ABCDEFGHIJKL", [18, 9, 24, 26, 40, 11, 11, 26, 12, 14, 14, 14]):
-        ws_comp.column_dimensions[col].width = width
-    _style_header(ws_comp)
-
-    ws_paid = wb.create_sheet(title="Paid Asset Executions")
-    ws_paid.append(["Date", "Project", "Outlet", "Field Rep", "Paid Assets Executed", "Image"])
-    for row_idx, item in enumerate(paid_rows, start=2):
-        ws_paid.append([item["Date"], item["Project"], item["Outlet"], item["Field Rep"], item["Paid Assets Executed"], ""])
-        ws_paid.row_dimensions[row_idx].height = 60
-        img_url = item.get("image_url")
-        if img_url in image_cache:
-            try:
-                xl_img = OpenPyxlImage(BytesIO(image_cache[img_url]))
-                xl_img.width, xl_img.height = 70, 70
-                ws_paid.add_image(xl_img, f"F{row_idx}")
-            except Exception:
-                ws_paid.cell(row=row_idx, column=6, value="[Image Error]")
-        elif img_url:
-            ws_paid.cell(row=row_idx, column=6, value="[Image Unavailable]")
-    for col, width in zip("ABCDEF", [18, 9, 24, 26, 30, 14]):
-        ws_paid.column_dimensions[col].width = width
-    _style_header(ws_paid)
-
-    ws_raw = wb.create_sheet(title="Raw Data")
-    export_cols = [c for c in raw_df.columns if c not in ("Parsed_Date", "Formatted_Timestamp")]
-    ws_raw.append(export_cols)
-    for r in raw_df[export_cols].itertuples(index=False):
-        ws_raw.append([None if (isinstance(v, float) and pd.isna(v)) else v for v in r])
-    _style_header(ws_raw)
-
-    output = BytesIO()
-    wb.save(output)
-    return output.getvalue()
-
-
-# --- POWERPOINT EXPORT (PAID ASSETS) ---
-def generate_pptx_report(paid_rows):
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    blank = prs.slide_layouts[6]
-
-    image_cache = fetch_all_images_parallel([i.get("image_url") for i in paid_rows if i.get("image_url")])
-
-    DARK_NAVY = RGBColor(15, 23, 42)
-    SLATE_MUTED = RGBColor(100, 116, 139)
-    WHITE = RGBColor(255, 255, 255)
-
-    slide_title = prs.slides.add_slide(blank)
-    tf_title = slide_title.shapes.add_textbox(Inches(0.8), Inches(2.5), Inches(11.733), Inches(3.0)).text_frame
-    tf_title.word_wrap = True
-    p1 = tf_title.paragraphs[0]
-    p1.text = "IB WEEKLY FIELD FINDINGS"
-    p1.font.size, p1.font.bold, p1.font.color.rgb, p1.font.name = Pt(38), True, DARK_NAVY, "Arial"
-    p2 = tf_title.add_paragraph()
-    p2.text = f"\nPaid Asset Executions Review | {datetime.now().strftime('%d %B %Y')}"
-    p2.font.size, p2.font.color.rgb, p2.font.name = Pt(20), SLATE_MUTED, "Arial"
-    bar = slide_title.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(6.8), Inches(13.333), Inches(0.7))
-    bar.fill.solid()
-    bar.fill.fore_color.rgb = DARK_NAVY
-    bar.line.color.rgb = DARK_NAVY
-
-    items = [i for i in paid_rows if i.get("image_url") in image_cache] or paid_rows
-    grid = [
-        (Inches(0.8), Inches(1.3)), (Inches(6.8), Inches(1.3)),
-        (Inches(0.8), Inches(4.3)), (Inches(6.8), Inches(4.3)),
+    # KPI band
+    kpi_items = [
+        ("Unique paid assets", len(paid_u), "#,##0"),
+        ("Unique unpaid assets", len(unpaid_u), "#,##0"),
+        ("Competitor outlets", ctx["comp_outlets"], "#,##0"),
+        ("Price cuts captured", len(priced), "#,##0"),
+        ("Avg promo depth", (priced["Depth %"].mean() / 100) if len(priced) else None, "0.0%"),
+        ("Deepest price cut", (priced["Depth %"].max() / 100) if len(priced) else None, "0.0%"),
     ]
-    w, h = Inches(5.6), Inches(2.7)
+    kpi_cols = [1, 2, 3, 6, 7, 8]
+    for (label, val, fmt), col in zip(kpi_items, kpi_cols):
+        lc = ws.cell(row=4, column=col, value=label.upper())
+        lc.font = Font(name="Calibri", size=8, bold=True, color="64748B")
+        lc.alignment = Alignment(wrap_text=True, vertical="bottom")
+        vc = ws.cell(row=5, column=col, value=val if val is not None else "—")
+        vc.font = Font(name="Calibri", size=18, bold=True, color=BRAND_NAVY)
+        vc.number_format = fmt
+        vc.alignment = Alignment(horizontal="left")
+        vc.border = Border(bottom=Side(style="medium", color=BRAND_TEAL))
+    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[5].height = 30
 
-    for slide_num, start in enumerate(range(0, len(items), 4), start=1):
-        slide = prs.slides.add_slide(blank)
-        p_hdr = slide.shapes.add_textbox(Inches(0.8), Inches(0.3), Inches(11.733), Inches(0.8)).text_frame.paragraphs[0]
-        p_hdr.text = f"PAID ASSETS EXECUTIONS (PAGE {slide_num})"
-        p_hdr.font.size, p_hdr.font.bold, p_hdr.font.color.rgb, p_hdr.font.name = Pt(22), True, DARK_NAVY, "Arial"
+    # Left column: by project + paid asset types
+    r = _xl_section(ws, 7, 1, "By project")
+    projects = sorted(set(paid_u["Project"].dropna()) | set(unpaid_u["Project"].dropna()) | set(ctx["comp_df"]["Select Your Project"].dropna()))
+    proj_rows = []
+    for p in projects:
+        proj_rows.append([
+            p,
+            int((paid_u["Project"] == p).sum()),
+            int((unpaid_u["Project"] == p).sum()),
+        ])
+    r = _xl_small_table(ws, r, 1, ["Project", "Unique paid", "Unique unpaid"], proj_rows, {1: "#,##0", 2: "#,##0"})
 
-        for (left, top), item in zip(grid, items[start:start + 4]):
-            if item.get("image_url") in image_cache:
+    r = _xl_section(ws, r, 1, "Unique paid assets by type")
+    if len(paid_u):
+        tc = paid_u.groupby("Asset").agg(n=("key", "size"), o=("key", "nunique")).sort_values("n", ascending=False)
+        rows = [[a, int(x.n), int(x.o)] for a, x in tc.iterrows()]
+    else:
+        rows = []
+    r_left = _xl_small_table(ws, r, 1, ["Asset type", "Unique assets", "Outlets"], rows, {1: "#,##0", 2: "#,##0"})
+
+    # Right column: competitor brands
+    r = _xl_section(ws, 7, 6, "Most active competitor brands")
+    if len(priced):
+        b = priced.groupby("Brand").agg(n=("Product", "size"), avg=("Depth %", "mean"), mx=("Depth %", "max"), o=("Outlet", "nunique")) \
+            .sort_values("n", ascending=False).head(15)
+        rows = [[br, int(x.n), int(x.o), x.avg / 100, x.mx / 100] for br, x in b.iterrows()]
+    else:
+        rows = []
+    r_right = _xl_small_table(ws, r, 6, ["Brand", "Price cuts", "Outlets", "Avg depth", "Deepest"], rows,
+                              {1: "#,##0", 2: "#,##0", 3: "0.0%", 4: "0.0%"})
+
+    # Full width: deepest price cuts
+    r = _xl_section(ws, max(r_left, r_right), 1, "Top 15 deepest competitor price cuts")
+    if len(priced):
+        top = priced.sort_values("Depth %", ascending=False).head(15)
+        rows = [[x["Product"], x["Was (KSh)"], x["Now (KSh)"], x["Depth %"] / 100, x["Brand"], x["Outlet"],
+                 x["Date"].to_pydatetime() if pd.notna(x["Date"]) else None, x["Ends"] or ""]
+                for _, x in top.iterrows()]
+    else:
+        rows = []
+    _xl_small_table(ws, r, 1, ["Product", "Was (KSh)", "Now (KSh)", "Depth", "Brand", "Outlet", "Date", "Ends"], rows,
+                    {1: "#,##0", 2: "#,##0", 3: "0.0%", 6: "dd mmm yyyy"}, text_cols=(0, 4, 5, 6, 7))
+    ws.freeze_panes = "A4"
+
+    # Competitor price cuts (all parsed lines)
+    if len(promo):
+        comp_tbl = promo.assign(**{"Depth": promo["Depth %"] / 100}).sort_values("Date", ascending=False)[
+            ["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Duration (days)", "Photo"]]
+    else:
+        comp_tbl = pd.DataFrame(columns=["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Duration (days)", "Photo"])
+    ws_c, hr = _xl_data_sheet(
+        wb, "Competitor Price Cuts", comp_tbl,
+        {"Date": "dd mmm yyyy", "Was (KSh)": "#,##0", "Now (KSh)": "#,##0", "Saving (KSh)": "#,##0", "Depth": "0.0%", "Duration (days)": "0"},
+        {"Date": 13, "Project": 9, "Outlet": 24, "Field Rep": 26, "Brand": 13, "Product": 38, "Was (KSh)": 11, "Now (KSh)": 11,
+         "Saving (KSh)": 12, "Depth": 10, "Ends": 11, "Duration (days)": 14, "Photo": 12},
+        link_cols=("Photo",), meta_line=meta_line,
+    )
+    if len(comp_tbl):
+        dcol = get_column_letter(list(comp_tbl.columns).index("Depth") + 1)
+        ws_c.conditional_formatting.add(f"{dcol}{hr + 1}:{dcol}{hr + len(comp_tbl)}",
+                                        DataBarRule(start_type="num", start_value=0, end_type="max", color="F87171"))
+
+    # Unique asset sheets
+    image_cache = fetch_all_images_parallel([u for u in ctx["paid_photos"].values() if u])
+    for title, uniq, src, photos, embed in [
+        ("Paid Assets", paid_u, paid_src, ctx["paid_photos"], True),
+        ("Unpaid Assets", unpaid_u, unpaid_src, ctx["unpaid_photos"], False),
+    ]:
+        rows = []
+        for i, a in uniq.iterrows():
+            row = src.loc[a["idx"]]
+            rows.append({
+                "Outlet": a["Outlet"], "Project": a["Project"], "Asset": a["Asset"], "Visits Seen": int(a["Visits"]),
+                "First Seen": a["First Seen"], "Last Seen": a["Last Seen"], "Last Reported By": row["Select Your Name"],
+                "Photo": img_src(photos[i]) if photos.get(i) else None, **({"Image": None} if embed else {}),
+            })
+        cols = ["Outlet", "Project", "Asset", "Visits Seen", "First Seen", "Last Seen", "Last Reported By", "Photo"] + (["Image"] if embed else [])
+        tdf = pd.DataFrame(rows, columns=cols)
+        ws_a, hr = _xl_data_sheet(
+            wb, title, tdf,
+            {"First Seen": "dd mmm yyyy", "Last Seen": "dd mmm yyyy", "Visits Seen": "0"},
+            {"Outlet": 26, "Project": 9, "Asset": 30, "Visits Seen": 11, "First Seen": 13, "Last Seen": 13, "Last Reported By": 26, "Photo": 12, "Image": 16},
+            link_cols=("Photo",), meta_line=meta_line,
+        )
+        if embed and len(tdf):
+            img_col = len(cols)
+            for n, (i, _) in enumerate(uniq.iterrows(), start=hr + 1):
+                url = photos.get(i)
+                ws_a.row_dimensions[n].height = 66
+                if url in image_cache:
+                    try:
+                        xl_img = OpenPyxlImage(BytesIO(image_cache[url]))
+                        ratio = xl_img.width / max(xl_img.height, 1)
+                        xl_img.height = 80
+                        xl_img.width = int(80 * ratio)
+                        if xl_img.width > 110:
+                            xl_img.width, xl_img.height = 110, int(110 / ratio)
+                        ws_a.add_image(xl_img, f"{get_column_letter(img_col)}{n}")
+                    except Exception:
+                        pass
+            for n in range(hr + 1, hr + len(tdf) + 1):
+                for j in range(1, img_col):
+                    ws_a.cell(row=n, column=j).alignment = Alignment(vertical="center")
+
+    # Raw data
+    raw = ctx["raw_df"].drop(columns=[c for c in ("Parsed_Date", "Formatted_Timestamp") if c in ctx["raw_df"].columns])
+    raw = raw.assign(**{"Submission Date": ctx["raw_df"]["Parsed_Date"]})
+    _xl_data_sheet(wb, "Raw Data", raw, {"Submission Date": "dd mmm yyyy hh:mm"},
+                   {c: (40 if "Photo" in c or c == DESC_COL else 18) for c in raw.columns}, meta_line=meta_line)
+
+    for sh in wb.worksheets:
+        sh.sheet_properties.tabColor = BRAND_NAVY if sh.title == "Summary" else BRAND_BLUE
+        sh.page_setup.orientation = "landscape"
+        sh.page_setup.fitToWidth = 1
+        sh.page_setup.fitToHeight = 0
+        sh.sheet_properties.pageSetUpPr.fitToPage = True
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+# --- POWERPOINT (SMOLLAN CORE TEMPLATE) ---
+def _rgb(hexstr):
+    return RGBColor.from_string(hexstr)
+
+
+def _template_prs():
+    if os.path.exists(TEMPLATE_PATH):
+        prs = Presentation(TEMPLATE_PATH)
+        sld_ids = prs.slides._sldIdLst
+        for sld_id in list(sld_ids):
+            prs.part.drop_rel(sld_id.rId)
+            sld_ids.remove(sld_id)
+        return prs, True
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    return prs, False
+
+
+def _layout(prs, name, fallback=6):
+    for l in prs.slide_layouts:
+        if l.name == name:
+            return l
+    return prs.slide_layouts[min(fallback, len(prs.slide_layouts) - 1)]
+
+
+def _ph(slide, idx):
+    for ph in slide.placeholders:
+        if ph.placeholder_format.idx == idx:
+            return ph
+    return None
+
+
+def _set_ph(slide, idx, text):
+    ph = _ph(slide, idx)
+    if ph is not None:
+        ph.text_frame.text = text
+    return ph
+
+
+def _drop_ph(slide, idx):
+    ph = _ph(slide, idx)
+    if ph is not None:
+        ph._element.getparent().remove(ph._element)
+
+
+def _textbox(slide, left, top, width, height, text, size=12, bold=False, color="1F2937", font="Calibri", align=None):
+    tb = slide.shapes.add_textbox(left, top, width, height)
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = Inches(0.05)
+    tf.margin_top = tf.margin_bottom = Inches(0.02)
+    p = tf.paragraphs[0]
+    p.text = text
+    p.font.size, p.font.bold, p.font.name = Pt(size), bold, font
+    p.font.color.rgb = _rgb(color)
+    if align:
+        p.alignment = align
+    return tb
+
+
+def _content_slide(prs, heading, subheading):
+    slide = prs.slides.add_slide(_layout(prs, "Title Slide - ONE LINE + SUB"))
+    _set_ph(slide, 0, heading.upper())
+    _set_ph(slide, 2, subheading)
+    _drop_ph(slide, 1)
+    return slide
+
+
+def _add_cover_picture(slide, img_bytes, left, top, width, height):
+    """Place an image filling the box (crop to fit, like CSS object-fit: cover)."""
+    with Image.open(BytesIO(img_bytes)) as im:
+        iw, ih = im.size
+    pic = slide.shapes.add_picture(BytesIO(img_bytes), left, top, width, height)
+    box_ratio, img_ratio = width / height, iw / ih
+    if img_ratio > box_ratio:
+        excess = 1 - box_ratio / img_ratio
+        pic.crop_left = pic.crop_right = excess / 2
+    elif img_ratio < box_ratio:
+        excess = 1 - img_ratio / box_ratio
+        pic.crop_top = pic.crop_bottom = excess / 2
+    return pic
+
+
+def _pptx_table(slide, left, top, width, headers, rows, col_widths=None, font_size=11):
+    shape = slide.shapes.add_table(len(rows) + 1, len(headers), left, top, width, Inches(0.32) * (len(rows) + 1))
+    tbl = shape.table
+    if col_widths:
+        total = sum(col_widths)
+        for j, w in enumerate(col_widths):
+            tbl.columns[j].width = int(width * w / total)
+    for j, h in enumerate(headers):
+        cell = tbl.cell(0, j)
+        cell.text = h
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = _rgb(BRAND_NAVY)
+        p = cell.text_frame.paragraphs[0]
+        p.font.size, p.font.bold, p.font.name = Pt(font_size), True, "Calibri"
+        p.font.color.rgb = _rgb("FFFFFF")
+    for i, r in enumerate(rows, start=1):
+        for j, v in enumerate(r):
+            cell = tbl.cell(i, j)
+            cell.text = str(v)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = _rgb(BRAND_ZEBRA if i % 2 == 0 else "FFFFFF")
+            p = cell.text_frame.paragraphs[0]
+            p.font.size, p.font.name = Pt(font_size), "Calibri"
+            p.font.color.rgb = _rgb("1F2937")
+    return shape
+
+
+def generate_pptx_report(ctx):
+    prs, has_template = _template_prs()
+    paid_u, paid_src, photos = ctx["paid_unique"], ctx["paid_df"], ctx["paid_photos"]
+    image_cache = fetch_all_images_parallel([u for u in photos.values() if u])
+    today = datetime.now().strftime("%d %B %Y")
+
+    # Cover
+    cover = prs.slides.add_slide(_layout(prs, "COVER - Shape Dark Blue", 0))
+    if has_template:
+        _set_ph(cover, 0, "Paid Asset Executions Review")
+        _set_ph(cover, 1, f"CHANDARIA {ctx['project_label'].upper()} · FIELD INTELLIGENCE")
+        _set_ph(cover, 2, f"{ctx['period_txt']}  ·  {today}")
+    else:
+        _textbox(cover, Inches(0.8), Inches(2.6), Inches(11.7), Inches(1.0), "Paid Asset Executions Review", 36, True, BRAND_NAVY, "Arial")
+        _textbox(cover, Inches(0.8), Inches(3.7), Inches(11.7), Inches(0.5), f"{ctx['period_txt']} · {today}", 16, False, "64748B")
+
+    # Summary
+    s = _content_slide(prs, "Paid assets summary", f"Unique paid assets · repeat visits to the same asset counted once · {ctx['period_txt']}")
+    kpis = [
+        ("UNIQUE PAID ASSETS", f"{len(paid_u):,}", BRAND_TEAL),
+        ("OUTLETS WITH PAID ASSETS", f"{paid_u['key'].nunique():,}" if len(paid_u) else "0", BRAND_BLUE),
+        ("UNIQUE UNPAID ASSETS", f"{len(ctx['unpaid_unique']):,}", BRAND_CYAN),
+        ("ASSET TYPES", f"{paid_u['Asset'].nunique():,}" if len(paid_u) else "0", BRAND_HEAD),
+    ]
+    kx, ky, kw, kh, gap = Inches(0.64), Inches(2.05), Inches(2.85), Inches(1.0), Inches(0.23)
+    for n, (label, value, color) in enumerate(kpis):
+        left = kx + (kw + gap) * n
+        box = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, ky, kw, kh)
+        box.fill.solid()
+        box.fill.fore_color.rgb = _rgb("F3F6FA")
+        box.line.fill.background()
+        bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, ky, Inches(0.07), kh)
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = _rgb(color)
+        bar.line.fill.background()
+        _textbox(s, left + Inches(0.2), ky + Inches(0.12), kw - Inches(0.3), Inches(0.3), label, 9, True, "64748B", "Montserrat")
+        _textbox(s, left + Inches(0.2), ky + Inches(0.38), kw - Inches(0.3), Inches(0.55), value, 26, True, BRAND_NAVY, "Montserrat")
+
+    if len(paid_u):
+        tc = paid_u["Asset"].value_counts().head(10).sort_values()
+        cd = CategoryChartData()
+        cd.categories = list(tc.index)
+        cd.add_series("Unique assets", [int(v) for v in tc.values])
+        gf = s.shapes.add_chart(XL_CHART_TYPE.BAR_CLUSTERED, Inches(0.64), Inches(3.35), Inches(6.6), Inches(3.6), cd)
+        ch = gf.chart
+        ch.has_legend = False
+        ch.has_title = True
+        ch.chart_title.text_frame.text = "Unique paid assets by type"
+        tp = ch.chart_title.text_frame.paragraphs[0]
+        tp.font.size, tp.font.bold, tp.font.name = Pt(12), True, "Montserrat"
+        tp.font.color.rgb = _rgb(BRAND_HEAD)
+        plot = ch.plots[0]
+        plot.gap_width = 60
+        plot.has_data_labels = True
+        plot.data_labels.font.size, plot.data_labels.font.name = Pt(10), "Calibri"
+        plot.data_labels.number_format, plot.data_labels.number_format_is_linked = "0", False
+        ser = plot.series[0]
+        ser.format.fill.solid()
+        ser.format.fill.fore_color.rgb = _rgb(BRAND_TEAL)
+        ch.value_axis.visible = False
+        ch.value_axis.has_major_gridlines = False
+        ch.category_axis.tick_labels.font.size, ch.category_axis.tick_labels.font.name = Pt(11), "Calibri"
+        ch.category_axis.tick_labels.font.color.rgb = _rgb("1F2937")
+        plot.data_labels.font.color.rgb = _rgb("1F2937")
+        plot.data_labels.font.bold = True
+        ch.category_axis.format.line.color.rgb = _rgb(BRAND_RULE)
+
+        by_proj = paid_u.groupby("Project").agg(a=("key", "size"), o=("key", "nunique")).reset_index()
+        unpaid_proj = ctx["unpaid_unique"].groupby("Project").size() if len(ctx["unpaid_unique"]) else pd.Series(dtype=int)
+        rows = [[r.Project, f"{r.a:,}", f"{r.o:,}", f"{int(unpaid_proj.get(r.Project, 0)):,}"] for r in by_proj.itertuples()]
+        _textbox(s, Inches(7.6), Inches(3.42), Inches(5.1), Inches(0.3), "By project", 12, True, BRAND_HEAD, "Montserrat")
+        _pptx_table(s, Inches(7.6), Inches(3.85), Inches(5.1), ["Project", "Unique paid", "Outlets", "Unique unpaid"], rows, [1.2, 1, 1, 1.1])
+
+    # Photo slides: four unique assets per slide
+    items = [(i, a) for i, a in paid_u.iterrows()]
+    with_img = [(i, a) for i, a in items if photos.get(i) in image_cache]
+    items = with_img or items
+    pages = max(1, math.ceil(len(items) / 4))
+    left0, top0 = Inches(0.64), Inches(1.98)
+    tw, th, gx, gy = Inches(5.92), Inches(2.42), Inches(0.25), Inches(0.2)
+    cap_h = Inches(0.42)
+    for page in range(pages):
+        chunk = items[page * 4:(page + 1) * 4]
+        if not chunk:
+            break
+        slide = _content_slide(prs, "Paid asset executions", f"Outlet photos · page {page + 1} of {pages}")
+        for n, (i, a) in enumerate(chunk):
+            left = left0 + (tw + gx) * (n % 2)
+            top = top0 + (th + gy) * (n // 2)
+            url = photos.get(i)
+            img_h = th - cap_h
+            if url in image_cache:
                 try:
-                    slide.shapes.add_picture(BytesIO(image_cache[item["image_url"]]), left, top, w, h)
+                    _add_cover_picture(slide, image_cache[url], left, top, tw, img_h)
                 except Exception:
                     pass
-            bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top + h - Inches(0.4), w, Inches(0.4))
-            bg.fill.solid()
-            bg.fill.fore_color.rgb = DARK_NAVY
-            bg.line.fill.background()
-            p_cap = slide.shapes.add_textbox(left, top + h - Inches(0.4), w, Inches(0.4)).text_frame.paragraphs[0]
-            p_cap.text = f" 📍 {item['Outlet']} | Rep: {item['Field Rep']}"
-            p_cap.font.size, p_cap.font.bold, p_cap.font.color.rgb, p_cap.font.name = Pt(10), True, WHITE, "Arial"
+            else:
+                ph = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, tw, img_h)
+                ph.fill.solid()
+                ph.fill.fore_color.rgb = _rgb("F3F6FA")
+                ph.line.fill.background()
+                _textbox(slide, left, top + img_h / 2 - Inches(0.15), tw, Inches(0.3), "Photo unavailable", 10, False, "94A3B8", align=PP_ALIGN.CENTER)
+            cap = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top + img_h, tw, cap_h)
+            cap.fill.solid()
+            cap.fill.fore_color.rgb = _rgb(BRAND_NAVY)
+            cap.line.fill.background()
+            accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top + img_h, Inches(0.06), cap_h)
+            accent.fill.solid()
+            accent.fill.fore_color.rgb = _rgb(BRAND_TEAL)
+            accent.line.fill.background()
+            row = paid_src.loc[a["idx"]]
+            last = a["Last Seen"].strftime("%d %b %Y") if pd.notna(a["Last Seen"]) else ""
+            visits = int(a["Visits"])
+            _textbox(slide, left + Inches(0.15), top + img_h + Inches(0.03), tw - Inches(0.25), Inches(0.2),
+                     f"{a['Outlet']}  ·  {a['Asset']}", 11, True, "FFFFFF")
+            _textbox(slide, left + Inches(0.15), top + img_h + Inches(0.21), tw - Inches(0.25), Inches(0.18),
+                     f"{row['Select Your Name'].title()}  ·  last seen {last}  ·  {visits} visit{'s' if visits != 1 else ''}", 9, False, "CFD8E4")
+
+    # Closing
+    if has_template:
+        close = prs.slides.add_slide(_layout(prs, "CLOSING Slide"))
+        _set_ph(close, 1, "SMOLLAN KENYA   |   CHANDARIA FIELD INTELLIGENCE")
+        _set_ph(close, 2, f"Generated {today}")
 
     out = BytesIO()
     prs.save(out)
@@ -681,6 +1053,38 @@ def promo_list_html(items):
     return f"<ul class='promo-list'>{''.join(lis)}</ul>"
 
 
+def outlet_key(name):
+    return re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
+
+
+def unique_assets(src_df, type_col, default_label):
+    """One row per outlet + asset type (repeat visits to the same asset count once); keeps the latest report."""
+    cols = ["key", "Asset", "idx", "Visits", "First Seen", "Last Seen", "Outlet", "Project"]
+    recs = []
+    for idx, row in src_df.iterrows():
+        raw = row[type_col]
+        types = [t.strip().title() for t in raw.split(",") if t.strip()] if isinstance(raw, str) and raw.strip() else []
+        for t in types or [default_label]:
+            recs.append({"key": outlet_key(row["Type Outlet Name"]), "Asset": t, "idx": idx, "date": row["Parsed_Date"], "typed": bool(types)})
+    if not recs:
+        return pd.DataFrame(columns=cols)
+    r = pd.DataFrame(recs)
+    typed_keys = set(r.loc[r["typed"], "key"])
+    r = r[r["typed"] | ~r["key"].isin(typed_keys)]
+    agg = (r.sort_values("date", ascending=False, na_position="last")
+             .groupby(["key", "Asset"], sort=False)
+             .agg(idx=("idx", "first"), Visits=("idx", "nunique"), **{"First Seen": ("date", "min"), "Last Seen": ("date", "max")})
+             .reset_index())
+    agg["Outlet"] = agg["idx"].map(src_df["Type Outlet Name"])
+    agg["Project"] = agg["idx"].map(src_df["Select Your Project"])
+    return agg.sort_values("Last Seen", ascending=False, na_position="last").reset_index(drop=True)
+
+
+def brand_of(product):
+    words = re.findall(r"[A-Za-z][A-Za-z'&]*", str(product))
+    return words[0].title() if words else "Other"
+
+
 # --- LOAD ---
 try:
     df, load_warnings, loaded_at = load_data()
@@ -747,6 +1151,7 @@ comp_parsed = {}
 for idx, row in comp_df.iterrows():
     items = parse_price_discounts(row[DESC_COL], submission_date=row["Parsed_Date"]) if isinstance(row[DESC_COL], str) else []
     comp_parsed[idx] = items
+    first_photo = next(iter(row_photos(row, [PHOTO_COMP, PHOTO_COMP_OTHERS])), None)
     for it in items:
         promo_records.append({
             "Date": row["Parsed_Date"], "Project": row["Select Your Project"], "Outlet": row["Type Outlet Name"],
@@ -754,40 +1159,23 @@ for idx, row in comp_df.iterrows():
             "Was (KSh)": it["old_price"], "Now (KSh)": it["new_price"],
             "Depth %": round(it["discount_pct"], 1) if it["discount_pct"] else None,
             "Saving (KSh)": it["discount_amount"], "Ends": it["end_date"], "Duration (days)": it["duration_days"],
+            "Brand": brand_of(it["product"]), "Photo": img_src(first_photo) if first_photo else None,
         })
 promo_df = pd.DataFrame(promo_records)
-priced_promos = promo_df[promo_df["Depth %"].notna()] if not promo_df.empty else promo_df
+priced_promos = promo_df[promo_df["Depth %"].notna()].copy() if not promo_df.empty else promo_df
 
-# Export rows
-global_comp_rows = []
-for idx, row in comp_df.iterrows():
-    first_img = next(iter(row_photos(row, [PHOTO_COMP, PHOTO_COMP_OTHERS])), None)
-    base = {"Date": row["Formatted_Timestamp"], "Project": row["Select Your Project"], "Outlet": row["Type Outlet Name"], "Field Rep": row["Select Your Name"], "image_url": first_img}
-    items = comp_parsed.get(idx) or []
-    if items:
-        for it in items:
-            global_comp_rows.append({**base,
-                "Activity": it["product"],
-                "Was": f"KSh {it['old_price']:.0f}" if it["old_price"] else "N/A",
-                "Now": f"KSh {it['new_price']:.0f}" if it["new_price"] else "N/A",
-                "Depth": f"Save KSh {it['discount_amount']:.0f} ({it['discount_pct']:.1f}% OFF)" if it["discount_amount"] else "N/A",
-                "Start Date": it["start_date"] or "N/A", "End Date": it["end_date"] or "N/A",
-                "Duration Days": f"{it['duration_days']} Days" if it["duration_days"] else "N/A",
-            })
-    else:
-        global_comp_rows.append({**base, "Activity": "Competitor activity confirmed (no notes entered).",
-            "Was": "N/A", "Now": "N/A", "Depth": "N/A", "Start Date": "N/A", "End Date": "N/A", "Duration Days": "N/A"})
+PAID_DEFAULT = "Paid Asset (Type Not Recorded)"
+UNPAID_DEFAULT = "Unpaid Asset (Type Not Recorded)"
+paid_unique = unique_assets(paid_df, PAID_TYPES_COL, PAID_DEFAULT)
+unpaid_unique = unique_assets(unpaid_df, UNPAID_TYPES_COL, UNPAID_DEFAULT)
 
-global_paid_rows = []
-for _, row in paid_df.iterrows():
-    global_paid_rows.append({
-        "Date": row["Formatted_Timestamp"], "Project": row["Select Your Project"], "Outlet": row["Type Outlet Name"],
-        "Field Rep": row["Select Your Name"], "Paid Assets Executed": row[PAID_TYPES_COL] or "Paid asset confirmed",
-        "image_url": next(iter(row_photos(row, [PHOTO_PAID])), None),
-    })
+paid_photos = {i: next(iter(row_photos(paid_df.loc[a["idx"]], [PHOTO_PAID])), None) for i, a in paid_unique.iterrows()}
+unpaid_photos = {i: next(iter(row_photos(unpaid_df.loc[a["idx"]], [PHOTO_UNPAID])), None) for i, a in unpaid_unique.iterrows()}
 
 # --- HEADER ---
-if not filtered_df["Parsed_Date"].dropna().empty:
+if start_d and end_d:
+    period_txt = f"{start_d.strftime('%d %b %Y')} – {end_d.strftime('%d %b %Y')}"
+elif not filtered_df["Parsed_Date"].dropna().empty:
     p_from = filtered_df["Parsed_Date"].min().strftime("%d %b %Y")
     p_to = filtered_df["Parsed_Date"].max().strftime("%d %b %Y")
     period_txt = f"{p_from} – {p_to}"
@@ -807,22 +1195,18 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-total = len(filtered_df)
-outlets_visited = filtered_df["Type Outlet Name"].nunique()
 avg_depth = priced_promos["Depth %"].mean() if not priced_promos.empty else None
-
-
-def pct_of(n):
-    return f"{n / total * 100:.0f}% of submissions" if total else "—"
-
+max_depth = priced_promos["Depth %"].max() if not priced_promos.empty else None
+comp_outlets = comp_df["Type Outlet Name"].map(outlet_key).nunique()
+n_brands = priced_promos["Brand"].nunique() if not priced_promos.empty else 0
+top_brand = priced_promos["Brand"].value_counts().idxmax() if not priced_promos.empty else None
 
 kpis = [
-    ("Submissions", f"{total:,}", f"{filtered_df['Select Your Name'].nunique()} field reps", "#38BDF8"),
-    ("Outlets Visited", f"{outlets_visited:,}", "unique outlets", "#38BDF8"),
-    ("Paid Assets", f"{int(paid_mask.sum()):,}", pct_of(paid_mask.sum()), ACTIVITY_COLORS["Paid Assets"]),
-    ("Unpaid Assets", f"{int(unpaid_mask.sum()):,}", pct_of(unpaid_mask.sum()), ACTIVITY_COLORS["Unpaid Assets"]),
-    ("Competitor", f"{int(comp_mask.sum()):,}", f"activity in {pct_of(comp_mask.sum())}" if total else "—", ACTIVITY_COLORS["Competitor Activities"]),
-    ("Avg Promo Depth", f"{avg_depth:.1f}%" if avg_depth is not None else "—", f"{len(priced_promos):,} price cuts captured", "#F87171"),
+    ("Unique Paid Assets", f"{len(paid_unique):,}", f"across {paid_unique['key'].nunique():,} outlets", ACTIVITY_COLORS["Paid Assets"]),
+    ("Unique Unpaid Assets", f"{len(unpaid_unique):,}", f"across {unpaid_unique['key'].nunique():,} outlets", ACTIVITY_COLORS["Unpaid Assets"]),
+    ("Competitor Outlets", f"{comp_outlets:,}", f"{len(priced_promos):,} price cuts captured", ACTIVITY_COLORS["Competitor Activities"]),
+    ("Avg Promo Depth", f"{avg_depth:.1f}%" if avg_depth is not None else "—", f"deepest {max_depth:.1f}%" if max_depth is not None else "—", "#F87171"),
+    ("Competitor Brands", f"{n_brands:,}", f"most active: {top_brand}" if top_brand else "—", "#A78BFA"),
 ]
 st.markdown(
     "<div class='kpi-row'>" + "".join(
@@ -844,66 +1228,70 @@ tab_overview, tab_comp, tab_assets, tab_gallery, tab_export = st.tabs(
 # OVERVIEW
 # ==========================================
 with tab_overview:
-    dated = filtered_df.dropna(subset=["Parsed_Date"])
-    c1, c2 = st.columns([3, 2], gap="large")
+    c1, c2 = st.columns(2, gap="large")
     with c1:
-        if not dated.empty:
-            span_days = (dated["Parsed_Date"].max() - dated["Parsed_Date"].min()).days
-            freq, label = ("D", "Daily") if span_days <= 45 else ("W-MON", "Weekly")
-            trend = dated.assign(Period=dated["Parsed_Date"].dt.to_period(freq).dt.start_time) \
-                .groupby(["Period", "Select Your Project"]).size().reset_index(name="Submissions")
-            fig = px.bar(trend, x="Period", y="Submissions", color="Select Your Project",
-                         color_discrete_map=PROJECT_COLORS, title=f"{label} submissions by project")
-            st.plotly_chart(style_fig(fig), use_container_width=True, config=PLOT_CONFIG)
+        if not priced_promos.empty:
+            bstats = priced_promos.groupby("Brand").agg(**{"Price cuts": ("Product", "size"), "Avg depth %": ("Depth %", "mean")}).reset_index()
+            top = bstats.sort_values("Price cuts", ascending=False).head(12).sort_values("Price cuts")
+            fig = px.bar(top, x="Price cuts", y="Brand", orientation="h", title="Most active competitor brands",
+                         text=top["Avg depth %"].map(lambda v: f"{v:.1f}% avg"), color_discrete_sequence=[ACTIVITY_COLORS["Competitor Activities"]],
+                         hover_data={"Avg depth %": ":.1f"})
+            fig.update_traces(textposition="outside", cliponaxis=False, textfont_size=11)
+            fig.update_xaxes(range=[0, top["Price cuts"].max() * 1.3])
+            st.plotly_chart(style_fig(fig, 400), use_container_width=True, config=PLOT_CONFIG)
+        else:
+            st.info("No priced competitor promotions for the selected filters.")
     with c2:
-        mix = filtered_df.groupby("Select Your Project").agg(
-            **{"Paid Assets": (PAID_COL, lambda s: is_yes(s).sum()),
-               "Unpaid Assets": (UNPAID_COL, lambda s: is_yes(s).sum()),
-               "Competitor Activities": (COMP_COL, lambda s: is_yes(s).sum())}
-        ).reset_index().melt(id_vars="Select Your Project", var_name="Activity", value_name="Outlets")
-        fig = px.bar(mix, x="Select Your Project", y="Outlets", color="Activity", barmode="group",
-                     color_discrete_map=ACTIVITY_COLORS, title="Activity mix by project")
-        st.plotly_chart(style_fig(fig), use_container_width=True, config=PLOT_CONFIG)
+        if not priced_promos.empty:
+            deep = bstats[bstats["Price cuts"] >= 3].sort_values("Avg depth %", ascending=False).head(12).sort_values("Avg depth %")
+            if deep.empty:
+                deep = bstats.sort_values("Avg depth %", ascending=False).head(12).sort_values("Avg depth %")
+            fig = px.bar(deep, x="Avg depth %", y="Brand", orientation="h", title="Deepest average promo depth by brand",
+                         text=deep["Avg depth %"].map(lambda v: f"{v:.1f}%"), color_discrete_sequence=["#FB923C"],
+                         hover_data={"Price cuts": True})
+            fig.update_traces(textposition="outside", cliponaxis=False, textfont_size=11)
+            fig.update_xaxes(ticksuffix="%", range=[0, deep["Avg depth %"].max() * 1.2])
+            st.plotly_chart(style_fig(fig, 400), use_container_width=True, config=PLOT_CONFIG)
 
     c3, c4 = st.columns(2, gap="large")
     with c3:
-        top_outlets = filtered_df["Type Outlet Name"].value_counts().head(10).sort_values().reset_index()
-        top_outlets.columns = ["Outlet", "Submissions"]
-        fig = px.bar(top_outlets, x="Submissions", y="Outlet", orientation="h", title="Most visited outlets",
-                     color_discrete_sequence=["#38BDF8"])
-        st.plotly_chart(style_fig(fig, 360), use_container_width=True, config=PLOT_CONFIG)
-    with c4:
-        types = filtered_df[PAID_TYPES_COL].dropna().astype(str).str.split(",").explode().str.strip()
-        types = types[types != ""]
-        if not types.empty:
-            tc = types.str.title().value_counts().sort_values().reset_index()
-            tc.columns = ["Asset Type", "Outlets"]
-            fig = px.bar(tc, x="Outlets", y="Asset Type", orientation="h", title="Paid asset types executed",
-                         color_discrete_sequence=[ACTIVITY_COLORS["Paid Assets"]])
+        if not paid_unique.empty:
+            tc = paid_unique["Asset"].value_counts().sort_values().reset_index()
+            tc.columns = ["Asset Type", "Unique assets"]
+            fig = px.bar(tc, x="Unique assets", y="Asset Type", orientation="h", title="Unique paid assets by type",
+                         text="Unique assets", color_discrete_sequence=[ACTIVITY_COLORS["Paid Assets"]])
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_xaxes(range=[0, tc["Unique assets"].max() * 1.15])
             st.plotly_chart(style_fig(fig, 360), use_container_width=True, config=PLOT_CONFIG)
-        elif not priced_promos.empty:
-            depth_by_rep = priced_promos.groupby("Project")["Depth %"].mean().reset_index()
-            fig = px.bar(depth_by_rep, x="Project", y="Depth %", title="Average competitor promo depth (%)",
-                         color="Project", color_discrete_map=PROJECT_COLORS)
+        else:
+            st.info("No paid assets for the selected filters.")
+    with c4:
+        mix = pd.concat([
+            paid_unique.groupby("Project").size().rename("Paid Assets"),
+            unpaid_unique.groupby("Project").size().rename("Unpaid Assets"),
+            comp_df.assign(k=comp_df["Type Outlet Name"].map(outlet_key)).groupby("Select Your Project")["k"].nunique().rename("Competitor Activities"),
+        ], axis=1).fillna(0).astype(int).rename_axis("Project").reset_index() \
+            .melt(id_vars="Project", var_name="Measure", value_name="Count")
+        if not mix.empty:
+            fig = px.bar(mix, x="Project", y="Count", color="Measure", barmode="group", text="Count",
+                         color_discrete_map=ACTIVITY_COLORS, title="Unique assets and competitor outlets by project")
+            fig.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(style_fig(fig, 360), use_container_width=True, config=PLOT_CONFIG)
 
-    st.markdown("<div class='section-title'>Field rep activity</div><div class='section-sub'>Submissions and findings per rep for the selected period</div>", unsafe_allow_html=True)
-    rep_tbl = filtered_df.groupby(["Select Your Name", "Select Your Project"]).agg(
-        Submissions=("Type Outlet Name", "size"),
-        Outlets=("Type Outlet Name", "nunique"),
-        **{"Paid Assets": (PAID_COL, lambda s: int(is_yes(s).sum())),
-           "Unpaid Assets": (UNPAID_COL, lambda s: int(is_yes(s).sum())),
-           "Competitor Activities": (COMP_COL, lambda s: int(is_yes(s).sum()))},
-        **{"Last Submission": ("Parsed_Date", "max")},
-    ).reset_index().rename(columns={"Select Your Name": "Field Rep", "Select Your Project": "Project"}) \
-        .sort_values("Submissions", ascending=False)
-    st.dataframe(
-        rep_tbl, hide_index=True, use_container_width=True,
-        column_config={
-            "Submissions": st.column_config.ProgressColumn("Submissions", format="%d", min_value=0, max_value=int(rep_tbl["Submissions"].max() or 1)),
-            "Last Submission": st.column_config.DatetimeColumn("Last Submission", format="DD MMM YYYY, HH:mm"),
-        },
-    )
+    st.markdown("<div class='section-title'>Deepest competitor price cuts</div><div class='section-sub'>Top 15 by promo depth for the selected period</div>", unsafe_allow_html=True)
+    if not priced_promos.empty:
+        top_cuts = priced_promos.sort_values("Depth %", ascending=False).head(15)[
+            ["Date", "Outlet", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Depth %", "Saving (KSh)", "Ends"]]
+        st.dataframe(
+            top_cuts, hide_index=True, use_container_width=True,
+            column_config={
+                "Date": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY"),
+                "Was (KSh)": st.column_config.NumberColumn("Was (KSh)", format="%,.0f"),
+                "Now (KSh)": st.column_config.NumberColumn("Now (KSh)", format="%,.0f"),
+                "Saving (KSh)": st.column_config.NumberColumn("Saving (KSh)", format="%,.0f"),
+                "Depth %": st.column_config.NumberColumn("Depth %", format="%.1f%%"),
+            },
+        )
 
 # ==========================================
 # COMPETITOR ACTIVITY
@@ -926,15 +1314,17 @@ with tab_comp:
         if priced_promos.empty:
             st.info("No priced competitor promotions captured for the selected filters.")
         else:
+            table_cols = ["Date", "Outlet", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Depth %", "Saving (KSh)",
+                          "Ends", "Duration (days)", "Project", "Field Rep"]
             st.dataframe(
-                priced_promos.sort_values("Date", ascending=False), hide_index=True, use_container_width=True,
+                priced_promos.sort_values("Date", ascending=False)[table_cols], hide_index=True, use_container_width=True,
                 height=min(600, 38 + 35 * len(priced_promos)),
                 column_config={
                     "Date": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY"),
                     "Was (KSh)": st.column_config.NumberColumn("Was (KSh)", format="%,.0f"),
                     "Now (KSh)": st.column_config.NumberColumn("Now (KSh)", format="%,.0f"),
                     "Saving (KSh)": st.column_config.NumberColumn("Saving (KSh)", format="%,.0f"),
-                    "Depth %": st.column_config.ProgressColumn("Depth %", format="%.1f%%", min_value=0, max_value=float(max(50, priced_promos["Depth %"].max()))),
+                    "Depth %": st.column_config.NumberColumn("Depth %", format="%.1f%%"),
                     "Duration (days)": st.column_config.NumberColumn("Duration (days)", format="%d"),
                 },
             )
@@ -952,20 +1342,27 @@ with tab_assets:
     asset_view = st.segmented_control("Assets", ["Paid assets", "Unpaid assets"], default="Paid assets", key="asset_view", label_visibility="collapsed")
     is_paid = asset_view != "Unpaid assets"
     src_df = paid_df if is_paid else unpaid_df
+    uniq = paid_unique if is_paid else unpaid_unique
     photo_col = PHOTO_PAID if is_paid else PHOTO_UNPAID
-    type_col = PAID_TYPES_COL if is_paid else UNPAID_TYPES_COL
     badge_cls = "badge-green" if is_paid else "badge-amber"
     label = "paid" if is_paid else "unpaid"
 
-    st.markdown(f"<div class='section-title'>Outlets with {label} assets</div><div class='section-sub'>{len(src_df):,} outlet reports, newest first</div>", unsafe_allow_html=True)
-    if src_df.empty:
+    n_outlets = uniq["key"].nunique() if not uniq.empty else 0
+    st.markdown(f"<div class='section-title'>Unique {label} assets</div><div class='section-sub'>{len(uniq):,} unique assets across {n_outlets:,} outlets · repeat visits to the same asset are counted once ({len(src_df):,} reports)</div>", unsafe_allow_html=True)
+    if uniq.empty:
         st.info(f"No outlets with {label} assets reported for the selected filters.")
     else:
-        s, e = paginate(len(src_df), f"{label}_page", 20)
-        for _, row in src_df.iloc[s:e].iterrows():
-            types_txt = row[type_col] if isinstance(row[type_col], str) and row[type_col] else f"{label.title()} asset confirmed"
-            badges = "".join(f"<span class='badge {badge_cls}'>{esc(t.strip())}</span> " for t in types_txt.split(",") if t.strip())
-            st.markdown(f"<div class='card'>{card_head(row)}<div>{badges}</div>{photos_html(row_photos(row, [photo_col]))}</div>", unsafe_allow_html=True)
+        outlet_groups = list(uniq.groupby("key", sort=False))
+        s_, e_ = paginate(len(outlet_groups), f"{label}_page", 20)
+        for key, grp in outlet_groups[s_:e_]:
+            latest = src_df.loc[grp.sort_values("Last Seen", ascending=False, na_position="last")["idx"].iloc[0]]
+            badges = "".join(
+                f"<span class='badge {badge_cls}'>{esc(a['Asset'])}</span>"
+                f"<span class='badge badge-muted'>seen on {int(a['Visits'])} visit{'s' if a['Visits'] != 1 else ''}"
+                + (f" · since {a['First Seen'].strftime('%d %b %Y')}" if pd.notna(a['First Seen']) else "") + "</span> "
+                for _, a in grp.iterrows()
+            )
+            st.markdown(f"<div class='card'>{card_head(latest)}<div style='display:flex;flex-wrap:wrap;gap:6px'>{badges}</div>{photos_html(row_photos(latest, [photo_col]))}</div>", unsafe_allow_html=True)
 
 # ==========================================
 # GALLERY
@@ -1008,20 +1405,28 @@ with tab_gallery:
 # ==========================================
 with tab_export:
     st.markdown("<div class='section-title'>Report exports</div><div class='section-sub'>Exports use the filters currently applied in the sidebar</div>", unsafe_allow_html=True)
+    export_ctx = {
+        "meta_line": f"Chandaria · Smollan Kenya   |   Period: {period_txt}   |   Project: {selected_project or 'All'}   |   Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
+        "period_txt": period_txt, "project_label": selected_project if selected_project and selected_project != "All" else "All Projects",
+        "priced": priced_promos, "promo": promo_df, "paid_unique": paid_unique, "unpaid_unique": unpaid_unique,
+        "paid_df": paid_df, "unpaid_df": unpaid_df, "comp_df": comp_df, "comp_outlets": comp_outlets,
+        "paid_photos": paid_photos, "unpaid_photos": unpaid_photos, "raw_df": filtered_df,
+    }
+    stamp = datetime.now().strftime("%Y%m%d")
     e1, e2 = st.columns(2, gap="large")
     with e1:
-        st.markdown(f"<div class='card'><div class='card-outlet'>Excel workbook</div><div class='card-rep'>Competitor depth, paid asset executions and raw data, with embedded photos · {len(global_comp_rows):,} activity rows · {len(global_paid_rows):,} paid asset rows</div></div>", unsafe_allow_html=True)
-        if st.button("Build Excel workbook", key="excel_btn", use_container_width=True):
-            with st.spinner("Downloading photos and building the workbook…"):
-                excel_bytes = generate_excel_with_images(global_comp_rows, global_paid_rows, filtered_df)
-            st.download_button("Download .xlsx", data=excel_bytes, file_name="Competitor_And_Paid_Assets_Report.xlsx",
+        st.markdown(f"<div class='card'><div class='card-outlet'>Excel report</div><div class='card-rep'>Summary, competitor price cuts, unique paid and unpaid assets with photos, and raw data · {len(promo_df):,} competitor lines · {len(paid_unique):,} unique paid assets</div></div>", unsafe_allow_html=True)
+        if st.button("Build Excel report", key="excel_btn", use_container_width=True):
+            with st.spinner("Downloading photos and building the report…"):
+                excel_bytes = generate_excel_report(export_ctx)
+            st.download_button("Download .xlsx", data=excel_bytes, file_name=f"Competitor_And_Paid_Assets_Report_{stamp}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="excel_dl", use_container_width=True, type="primary")
     with e2:
-        st.markdown(f"<div class='card'><div class='card-outlet'>Paid assets deck</div><div class='card-rep'>PowerPoint review with four photos per slide · {len(global_paid_rows):,} paid asset executions</div></div>", unsafe_allow_html=True)
-        if st.button("Build PowerPoint deck", key="ppt_btn", use_container_width=True, disabled=not global_paid_rows):
+        st.markdown(f"<div class='card'><div class='card-outlet'>Paid assets deck</div><div class='card-rep'>Smollan template · cover, summary, four photos per slide · {len(paid_unique):,} unique paid assets</div></div>", unsafe_allow_html=True)
+        if st.button("Build PowerPoint deck", key="ppt_btn", use_container_width=True, disabled=paid_unique.empty):
             with st.spinner("Downloading photos and building the deck…"):
-                ppt_bytes = generate_pptx_report(global_paid_rows)
-            st.download_button("Download .pptx", data=ppt_bytes, file_name="Chandaria_Paid_Assets_Review.pptx",
+                ppt_bytes = generate_pptx_report(export_ctx)
+            st.download_button("Download .pptx", data=ppt_bytes, file_name=f"Chandaria_Paid_Assets_Review_{stamp}.pptx",
                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                key="ppt_dl", use_container_width=True, type="primary")
