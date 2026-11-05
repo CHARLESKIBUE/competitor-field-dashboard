@@ -87,6 +87,7 @@ section[data-testid="stSidebar"] .sb-title {
     font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--muted); margin: 18px 0 6px 0;
 }
+section[data-testid="stSidebar"] [data-testid="stDateInput"] label p { font-size: 0.75rem; color: var(--muted); }
 section[data-testid="stSidebar"] .sb-brand {
     font-size: 1.05rem; font-weight: 800; color: var(--text-strong); letter-spacing: -0.01em;
 }
@@ -1298,12 +1299,20 @@ valid_dates = df["Parsed_Date"].dropna()
 start_d = end_d = None
 if not valid_dates.empty:
     min_d, max_d = valid_dates.min().date(), valid_dates.max().date()
-    st.sidebar.markdown("<div class='sb-title'>Period</div>", unsafe_allow_html=True)
-    period = st.sidebar.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d, key="period", label_visibility="collapsed")
-    if isinstance(period, (list, tuple)) and len(period) == 2:
-        start_d, end_d = period
-    elif isinstance(period, (list, tuple)) and len(period) == 1:
-        start_d = end_d = period[0]
+    def clamp(d):
+        return max(min_d, min(max_d, d))
+
+    if "date_from" not in st.session_state:
+        st.session_state.date_from, st.session_state.date_to = min_d, max_d
+    st.session_state.date_from = clamp(st.session_state.date_from)
+    st.session_state.date_to = clamp(st.session_state.date_to)
+
+    st.sidebar.date_input("From", key="date_from", min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
+    st.sidebar.date_input("To", key="date_to", min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
+    start_d, end_d = st.session_state.date_from, st.session_state.date_to
+    if start_d > end_d:
+        st.sidebar.warning("'From' is after 'To' — the dates have been swapped.")
+        start_d, end_d = end_d, start_d
 
 filtered_df = df.copy()
 if start_d and end_d:
