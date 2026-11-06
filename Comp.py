@@ -427,6 +427,68 @@ def parse_price_discounts(text, submission_date=None):
     return out
 
 
+def offer_status(end_ts, end_label=None):
+    """Offer status measured against today: Ended / Ends today / Running · N days left / While stocks last."""
+    if end_ts is None or (isinstance(end_ts, float) and pd.isna(end_ts)) or end_ts is pd.NaT:
+        return "While stocks last" if end_label == "While stocks last" else ""
+    today = pd.Timestamp(datetime.now()).normalize()
+    days = int((pd.Timestamp(end_ts).normalize() - today).days)
+    if days < 0:
+        return "Ended"
+    if days == 0:
+        return "Ends today"
+    return f"Running · {days} day{'s' if days != 1 else ''} left"
+
+
+def _offer_key(product, new_price, end_ts):
+    name = re.sub(r"[^a-z0-9]+", "", str(product).lower())
+    return (name, new_price, pd.Timestamp(end_ts).normalize() if end_ts is not None else None)
+
+
+def offer_period(start_ts, end_ts, end_label=None):
+    """'05 Oct – 11 Oct 2026 · 7 days' from the first day the offer was seen to its end date."""
+    if start_ts is None or pd.isna(start_ts):
+        return ""
+    start = pd.Timestamp(start_ts).normalize()
+    if end_ts is None or pd.isna(end_ts):
+        tail = " · while stocks last" if end_label == "While stocks last" else ""
+        return f"From {start.strftime('%d %b %Y')}{tail}"
+    end = max(pd.Timestamp(end_ts).normalize(), start)
+    left = start.strftime("%d %b") if start.year == end.year else start.strftime("%d %b %Y")
+    return f"{left} – {end.strftime('%d %b %Y')}"
+
+
+def days_ran(start_ts, end_ts):
+    """Days the offer ran: first seen to end date (ended), or first seen to today (still running)."""
+    if start_ts is None or pd.isna(start_ts) or end_ts is None or pd.isna(end_ts):
+        return None
+    start = pd.Timestamp(start_ts).normalize()
+    end = pd.Timestamp(end_ts).normalize()
+    today = pd.Timestamp(datetime.now()).normalize()
+    stop = min(end, today) if end >= start else start
+    return int((stop - start).days) + 1
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def parse_all_notes(df):
+    """Parse every competitor note once; returns {row index: items} and {offer key: first date seen}."""
+    parsed, first_seen = {}, {}
+    mask = df[COMP_COL].astype(str).str.strip().str.lower() == "yes"
+    for idx, row in df[mask].iterrows():
+        items = parse_price_discounts(row[DESC_COL], submission_date=row["Parsed_Date"]) if isinstance(row[DESC_COL], str) else []
+        parsed[idx] = items
+        visit = row["Parsed_Date"]
+        if pd.isna(visit):
+            continue
+        for it in items:
+            if it["new_price"] is None:
+                continue
+            k = _offer_key(it["product"], it["new_price"], it.get("end_ts"))
+            if k not in first_seen or visit < first_seen[k]:
+                first_seen[k] = visit
+    return parsed, first_seen
+
+
 # --- PHOTO LINKS ---
 def drive_display_url(url):
     """Convert a Google Drive file link into a thumbnail link that renders in <img> tags and downloads reliably."""
@@ -689,16 +751,16 @@ def generate_excel_report(ctx):
     ws.freeze_panes = "A4"
 
     # Competitor price cuts (all parsed lines)
-    comp_cols = ["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Days Left", "Photo"]
+    comp_cols = ["Date", "Project", "Outlet", "Field Rep", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Saving (KSh)", "Depth", "Ends", "Offer Status", "Offer Period", "Days Ran", "Photo"]
     if len(priced):
         comp_tbl = priced.assign(**{"Depth": priced["Depth %"] / 100}).sort_values("Date", ascending=False)[comp_cols]
     else:
         comp_tbl = pd.DataFrame(columns=comp_cols)
     ws_c, hr = _xl_data_sheet(
         wb, "Competitor Price Cuts", comp_tbl,
-        {"Date": "dd mmm yyyy", "Was (KSh)": "#,##0", "Now (KSh)": "#,##0", "Saving (KSh)": "#,##0", "Depth": "0.0%", "Days Left": "0"},
+        {"Date": "dd mmm yyyy", "Was (KSh)": "#,##0", "Now (KSh)": "#,##0", "Saving (KSh)": "#,##0", "Depth": "0.0%", "Days Ran": "0"},
         {"Date": 13, "Project": 9, "Outlet": 24, "Field Rep": 26, "Brand": 13, "Product": 38, "Was (KSh)": 11, "Now (KSh)": 11,
-         "Saving (KSh)": 12, "Depth": 10, "Ends": 13, "Days Left": 10, "Photo": 12},
+         "Saving (KSh)": 12, "Depth": 10, "Ends": 13, "Offer Status": 22, "Offer Period": 22, "Days Ran": 10, "Photo": 12},
         link_cols=("Photo",), meta_line=meta_line,
     )
     if len(comp_tbl):
@@ -1222,8 +1284,10 @@ def promo_list_html(items):
             extras += f"<span class='badge badge-muted'>Ends {it['end_ts'].strftime('%d %b %Y')}</span>"
         elif it.get("end_date"):
             extras += f"<span class='badge badge-muted'>{esc(it['end_date'])}</span>"
-        if it.get("duration_days"):
-            extras += f"<span class='badge badge-muted'>{it['duration_days']} days left</span>"
+        status_txt = offer_status(it.get("end_ts"), it.get("end_date"))
+        if status_txt and status_txt != "While stocks last":
+            cls = "badge-muted" if status_txt == "Ended" else "badge-green"
+            extras += f"<span class='badge {cls}'>{esc(status_txt)}</span>"
         if it.get("status") == "ok":
             lis.append(
                 f"<li><span class='p-name'>{esc(it['product'])}</span>"
@@ -1355,12 +1419,15 @@ paid_df = filtered_df[paid_mask]
 unpaid_df = filtered_df[unpaid_mask]
 
 promo_records = []
+all_parsed, offer_first_seen = parse_all_notes(df)
 comp_parsed = {}
 for idx, row in comp_df.iterrows():
-    items = parse_price_discounts(row[DESC_COL], submission_date=row["Parsed_Date"]) if isinstance(row[DESC_COL], str) else []
+    items = all_parsed.get(idx, [])
     comp_parsed[idx] = items
     first_photo = next(iter(row_photos(row, [PHOTO_COMP, PHOTO_COMP_OTHERS])), None)
     for it in items:
+        _start = (offer_first_seen.get(_offer_key(it["product"], it["new_price"], it.get("end_ts")), row["Parsed_Date"])
+                  if it["new_price"] is not None else row["Parsed_Date"])
         promo_records.append({
             "Date": row["Parsed_Date"], "Project": row["Select Your Project"], "Outlet": row["Type Outlet Name"],
             "Field Rep": row["Select Your Name"], "Product": it["product"],
@@ -1368,7 +1435,10 @@ for idx, row in comp_df.iterrows():
             "Depth %": round(it["discount_pct"], 1) if it["discount_pct"] else None,
             "Saving (KSh)": it["discount_amount"],
             "Ends": (it["end_ts"].strftime("%d %b %Y") if it.get("end_ts") is not None else (it["end_date"] or "")),
-            "Days Left": it["duration_days"], "Status": it["status"], "Check": it["reason"], "Note": it["raw_line"],
+            "Offer Status": offer_status(it.get("end_ts"), it.get("end_date")),
+            "Offer Period": offer_period(_start, it.get("end_ts"), it.get("end_date")),
+            "Days Ran": days_ran(_start, it.get("end_ts")),
+            "Status": it["status"], "Check": it["reason"], "Note": it["raw_line"],
             "Brand": brand_of(it["product"]), "Photo": img_src(first_photo) if first_photo else None,
         })
 promo_df = pd.DataFrame(promo_records)
@@ -1525,7 +1595,7 @@ with tab_comp:
             st.info("No priced competitor promotions captured for the selected filters.")
         else:
             table_cols = ["Date", "Outlet", "Brand", "Product", "Was (KSh)", "Now (KSh)", "Depth %", "Saving (KSh)",
-                          "Ends", "Days Left", "Project", "Field Rep"]
+                          "Ends", "Offer Status", "Offer Period", "Days Ran", "Project", "Field Rep"]
             st.dataframe(
                 priced_promos.sort_values("Date", ascending=False)[table_cols], hide_index=True, use_container_width=True,
                 height=min(600, 38 + 35 * len(priced_promos)),
@@ -1535,7 +1605,9 @@ with tab_comp:
                     "Now (KSh)": st.column_config.NumberColumn("Now (KSh)", format="%,.0f"),
                     "Saving (KSh)": st.column_config.NumberColumn("Saving (KSh)", format="%,.0f"),
                     "Depth %": st.column_config.NumberColumn("Depth %", format="%.1f%%"),
-                    "Days Left": st.column_config.NumberColumn("Days Left", format="%d", help="Days from the visit to the offer end date"),
+                    "Offer Status": st.column_config.TextColumn("Offer Status", help="Measured against today's date"),
+                    "Offer Period": st.column_config.TextColumn("Offer Period", help="From the first day the offer was seen in the field to its end date"),
+                    "Days Ran": st.column_config.NumberColumn("Days Ran", format="%d", help="Ended offers: first seen to end date. Running offers: first seen to today."),
                 },
             )
             unpriced = promo_df[promo_df["Status"] != "ok"] if not promo_df.empty else promo_df
