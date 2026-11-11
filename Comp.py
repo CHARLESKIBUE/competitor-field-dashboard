@@ -30,6 +30,8 @@ JOTFORM_API_KEY = "6666042ab61ea98f9b378a4a7d"
 NEW_SHEET_CSV = "https://docs.google.com/spreadsheets/d/1_k43t4QFDvDpisgFLs1lRykzOdIA4F_AC045SX-u78A/export?format=csv&gid=433581189"
 OLD_SHEET_CSV = "https://docs.google.com/spreadsheets/d/1XeWdaYVyLdqfgF00nKBOjZ0OlhtcqRHb6HO0b1lND0Y/export?format=csv&gid=284416453"
 
+TEAMS = {"core": "CORE", "ib": "IB"}
+TEAM_LABELS = {"CORE": "Core", "IB": "IB"}
 PROJECT_COLORS = {"CORE": "#38BDF8", "IB": "#A78BFA", "Unassigned": "#64748B"}
 ACTIVITY_COLORS = {"Paid Assets": "#34D399", "Unpaid Assets": "#FBBF24", "Competitor Activities": "#F87171"}
 
@@ -680,7 +682,7 @@ def generate_excel_report(ctx):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Summary"
-    _xl_title_block(ws, "Competitor Activities & Paid Assets Report", meta_line, 10)
+    _xl_title_block(ws, f"{ctx['team_label']} Competitor Activities & Paid Assets Report", meta_line, 10)
     for col, w in zip("ABCDEFGHIJ", [32, 13, 13, 11, 14, 24, 12, 12, 12, 12]):
         ws.column_dimensions[col].width = w
 
@@ -706,17 +708,22 @@ def generate_excel_report(ctx):
     ws.row_dimensions[4].height = 26
     ws.row_dimensions[5].height = 30
 
-    # Left column: by project + paid asset types
-    r = _xl_section(ws, 7, 1, "By project")
-    projects = sorted(set(paid_u["Project"].dropna()) | set(unpaid_u["Project"].dropna()) | set(ctx["comp_df"]["Select Your Project"].dropna()))
-    proj_rows = []
-    for p in projects:
-        proj_rows.append([
-            p,
-            int((paid_u["Project"] == p).sum()),
-            int((unpaid_u["Project"] == p).sum()),
+    # Left column: by chain + paid asset types
+    r = _xl_section(ws, 7, 1, "By chain")
+    comp_chains = ctx["comp_df"]["Type Outlet Name"].map(chain_of)
+    comp_keys = ctx["comp_df"]["Type Outlet Name"].map(outlet_key)
+    chains = set(paid_u["Chain"].dropna()) | set(unpaid_u["Chain"].dropna()) | set(comp_chains.dropna())
+    chain_rows = []
+    for c in chains:
+        chain_rows.append([
+            c,
+            int((paid_u["Chain"] == c).sum()) if len(paid_u) else 0,
+            int((unpaid_u["Chain"] == c).sum()) if len(unpaid_u) else 0,
+            int(comp_keys[comp_chains == c].nunique()),
         ])
-    r = _xl_small_table(ws, r, 1, ["Project", "Unique paid", "Unique unpaid"], proj_rows, {1: "#,##0", 2: "#,##0"})
+    chain_rows.sort(key=lambda x: (-(x[1] + x[2] + x[3]), x[0]))
+    r = _xl_small_table(ws, r, 1, ["Chain", "Unique paid", "Unique unpaid", "Competitor outlets"], chain_rows,
+                        {1: "#,##0", 2: "#,##0", 3: "#,##0"})
 
     r = _xl_section(ws, r, 1, "Unique paid assets by type")
     if len(paid_u):
@@ -954,11 +961,11 @@ def generate_pptx_report(ctx):
     # Cover
     cover = prs.slides.add_slide(_layout(prs, "COVER - Shape Dark Blue", 6))
     if has_template:
-        _set_ph(cover, 0, "Paid Asset Executions Review")
+        _set_ph(cover, 0, f"{ctx['team_label']} Paid Asset Executions Review")
         _set_ph(cover, 1, f"CHANDARIA {ctx['project_label'].upper()} · FIELD INTELLIGENCE")
         _set_ph(cover, 2, f"{ctx['period_txt']}  ·  {today}")
     else:
-        _textbox(cover, Inches(0.8), Inches(2.6), Inches(11.7), Inches(1.0), "Paid Asset Executions Review", 36, True, BRAND_NAVY, "Arial")
+        _textbox(cover, Inches(0.8), Inches(2.6), Inches(11.7), Inches(1.0), f"{ctx['team_label']} Paid Asset Executions Review", 36, True, BRAND_NAVY, "Arial")
         _textbox(cover, Inches(0.8), Inches(3.7), Inches(11.7), Inches(0.5), f"{ctx['period_txt']} · {today}", 16, False, "64748B")
 
     # Summary
@@ -1012,11 +1019,11 @@ def generate_pptx_report(ctx):
         plot.data_labels.font.bold = True
         ch.category_axis.format.line.color.rgb = _rgb(BRAND_RULE)
 
-        by_proj = paid_u.groupby("Project").agg(a=("key", "size"), o=("key", "nunique")).reset_index()
-        unpaid_proj = ctx["unpaid_unique"].groupby("Project").size() if len(ctx["unpaid_unique"]) else pd.Series(dtype=int)
-        rows = [[r.Project, f"{r.a:,}", f"{r.o:,}", f"{int(unpaid_proj.get(r.Project, 0)):,}"] for r in by_proj.itertuples()]
-        _textbox(s, Inches(7.6), Inches(3.42), Inches(5.1), Inches(0.3), "By project", 12, True, BRAND_HEAD, "Montserrat")
-        _pptx_table(s, Inches(7.6), Inches(3.85), Inches(5.1), ["Project", "Unique paid", "Outlets", "Unique unpaid"], rows, [1.2, 1, 1, 1.1])
+        by_chain = paid_u.groupby("Chain").agg(a=("key", "size"), o=("key", "nunique")).reset_index().sort_values("a", ascending=False).head(8)
+        unpaid_chain = ctx["unpaid_unique"].groupby("Chain").size() if len(ctx["unpaid_unique"]) else pd.Series(dtype=int)
+        rows = [[r.Chain, f"{r.a:,}", f"{r.o:,}", f"{int(unpaid_chain.get(r.Chain, 0)):,}"] for r in by_chain.itertuples()]
+        _textbox(s, Inches(7.6), Inches(3.42), Inches(5.1), Inches(0.3), "By chain", 12, True, BRAND_HEAD, "Montserrat")
+        _pptx_table(s, Inches(7.6), Inches(3.85), Inches(5.1), ["Chain", "Unique paid", "Outlets", "Unique unpaid"], rows, [1.4, 1, 1, 1.1])
 
     # Photo slides: four unique assets per slide
     items = [(i, a) for i, a in paid_u.iterrows()]
@@ -1305,13 +1312,33 @@ def promo_list_html(items):
     return f"<ul class='promo-list'>{''.join(lis)}</ul>"
 
 
+CHAIN_PREFIXES = [
+    ("naivas", "Naivas"), ("naiva", "Naivas"), ("quickmart", "Quickmart"), ("quckamart", "Quickmart"), ("quickmat", "Quickmart"),
+    ("qkmt", "Quickmart"), ("qm ", "Quickmart"), ("quick ", "Quickmart"), ("carrefour", "Carrefour"), ("c4", "Carrefour"),
+    ("c 4", "Carrefour"), ("chandarana", "Chandarana"), ("magunas", "Magunas"), ("maguna", "Magunas"), ("cleanshelf", "Cleanshelf"),
+    ("cleashelf", "Cleanshelf"), ("clean shelf", "Cleanshelf"), ("powerstar", "Powerstar"), ("power star", "Powerstar"),
+    ("khetia", "Khetia's"), ("woolmatt", "Woolmatt"), ("gilani", "Gilani's"), ("kibuye", "Kibuye"), ("baraka", "Baraka"),
+    ("eastmatt", "Eastmatt"), ("jamaa", "Jamaa"), ("pandamart", "Panda Mart"), ("panda", "Panda Mart"), ("kasamatt", "Kassmatt"),
+    ("kassmatt", "Kassmatt"), ("mathai", "Mathai"), ("tulin", "Tulin"),
+]
+
+
+def chain_of(outlet):
+    """Retail chain from the outlet name the rep typed (e.g. 'Qkmt Otc' -> Quickmart, 'C4 Sarit' -> Carrefour)."""
+    text = re.sub(r"[^a-z0-9 ]+", " ", str(outlet).lower()).strip() + " "
+    for prefix, chain in CHAIN_PREFIXES:
+        if text.startswith(prefix):
+            return chain
+    return "Other"
+
+
 def outlet_key(name):
     return re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
 
 
 def unique_assets(src_df, type_col, default_label):
     """One row per outlet + asset type (repeat visits to the same asset count once); keeps the latest report."""
-    cols = ["key", "Asset", "idx", "Visits", "First Seen", "Last Seen", "Outlet", "Project"]
+    cols = ["key", "Asset", "idx", "Visits", "First Seen", "Last Seen", "Outlet", "Project", "Chain"]
     recs = []
     for idx, row in src_df.iterrows():
         raw = row[type_col]
@@ -1329,6 +1356,7 @@ def unique_assets(src_df, type_col, default_label):
              .reset_index())
     agg["Outlet"] = agg["idx"].map(src_df["Type Outlet Name"])
     agg["Project"] = agg["idx"].map(src_df["Select Your Project"])
+    agg["Chain"] = agg["Outlet"].map(chain_of)
     return agg.sort_values("Last Seen", ascending=False, na_position="last").reset_index(drop=True)
 
 
@@ -1357,47 +1385,57 @@ except Exception as e:
     st.stop()
 
 # --- SIDEBAR ---
-st.sidebar.markdown("<div class='sb-brand'>Field Intelligence</div><div class='sb-brand-sub'>Chandaria · Smollan Kenya</div>", unsafe_allow_html=True)
+_team_from_url = TEAMS.get(str(st.query_params.get("team", "")).strip().lower())
+st.sidebar.markdown(
+    f"<div class='sb-brand'>{TEAM_LABELS[_team_from_url] + ' ' if _team_from_url else ''}Field Intelligence</div>"
+    "<div class='sb-brand-sub'>Chandaria · Smollan Kenya</div>", unsafe_allow_html=True)
 
-valid_dates = df["Parsed_Date"].dropna()
+_qp_team = str(st.query_params.get("team", "")).strip().lower()
+team_locked = _qp_team in TEAMS
+if team_locked:
+    team = TEAMS[_qp_team]
+else:
+    st.sidebar.markdown("<div class='sb-title'>Team</div>", unsafe_allow_html=True)
+    team = st.sidebar.segmented_control("Team", options=["CORE", "IB"], format_func=lambda t: TEAM_LABELS[t],
+                                        default="CORE", key="team", label_visibility="collapsed") or "CORE"
+team_label = TEAM_LABELS[team]
+selected_project = team
+team_df = df[df["Select Your Project"] == team]
+
+valid_dates = team_df["Parsed_Date"].dropna()
 start_d = end_d = None
 if not valid_dates.empty:
     min_d, max_d = valid_dates.min().date(), valid_dates.max().date()
     def clamp(d):
         return max(min_d, min(max_d, d))
 
-    if "date_from" not in st.session_state:
-        st.session_state.date_from, st.session_state.date_to = min_d, max_d
-    st.session_state.date_from = clamp(st.session_state.date_from)
-    st.session_state.date_to = clamp(st.session_state.date_to)
+    k_from, k_to = f"date_from_{team}", f"date_to_{team}"
+    if k_from not in st.session_state:
+        st.session_state[k_from], st.session_state[k_to] = min_d, max_d
+    st.session_state[k_from] = clamp(st.session_state[k_from])
+    st.session_state[k_to] = clamp(st.session_state[k_to])
 
-    st.sidebar.date_input("From", key="date_from", min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
-    st.sidebar.date_input("To", key="date_to", min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
-    start_d, end_d = st.session_state.date_from, st.session_state.date_to
+    st.sidebar.date_input("From", key=k_from, min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
+    st.sidebar.date_input("To", key=k_to, min_value=min_d, max_value=max_d, format="DD/MM/YYYY")
+    start_d, end_d = st.session_state[k_from], st.session_state[k_to]
     if start_d > end_d:
         st.sidebar.warning("'From' is after 'To' — the dates have been swapped.")
         start_d, end_d = end_d, start_d
 
-filtered_df = df.copy()
+filtered_df = team_df.copy()
 if start_d and end_d:
     d = filtered_df["Parsed_Date"].dt.date
     filtered_df = filtered_df[(d >= start_d) & (d <= end_d)]
 
-st.sidebar.markdown("<div class='sb-title'>Project</div>", unsafe_allow_html=True)
-project_list = ["All"] + sorted(df["Select Your Project"].dropna().unique().tolist())
-selected_project = st.sidebar.segmented_control("Project", options=project_list, default="All", key="project", label_visibility="collapsed")
-if selected_project and selected_project != "All":
-    filtered_df = filtered_df[filtered_df["Select Your Project"] == selected_project]
-
 st.sidebar.markdown("<div class='sb-title'>Field Rep</div>", unsafe_allow_html=True)
 rep_options = sorted(filtered_df["Select Your Name"].dropna().unique().tolist())
-selected_reps = st.sidebar.multiselect("Field Rep", rep_options, placeholder="All reps", key="reps", label_visibility="collapsed")
+selected_reps = st.sidebar.multiselect("Field Rep", rep_options, placeholder="All reps", key=f"reps_{team}", label_visibility="collapsed")
 if selected_reps:
     filtered_df = filtered_df[filtered_df["Select Your Name"].isin(selected_reps)]
 
 st.sidebar.markdown("<div class='sb-title'>Outlet</div>", unsafe_allow_html=True)
 outlet_options = sorted(filtered_df["Type Outlet Name"].dropna().unique().tolist())
-selected_outlets = st.sidebar.multiselect("Outlet", outlet_options, placeholder="All outlets", key="outlets", label_visibility="collapsed")
+selected_outlets = st.sidebar.multiselect("Outlet", outlet_options, placeholder="All outlets", key=f"outlets_{team}", label_visibility="collapsed")
 if selected_outlets:
     filtered_df = filtered_df[filtered_df["Type Outlet Name"].isin(selected_outlets)]
 
@@ -1465,12 +1503,12 @@ else:
 st.markdown(f"""
 <div class="dash-header">
   <div>
-    <div class="dash-eyebrow">Chandaria Field Intelligence</div>
-    <div class="dash-title">Competitor Activities &amp; Paid Assets</div>
+    <div class="dash-eyebrow">Chandaria {esc(team_label)} · Field Intelligence</div>
+    <div class="dash-title">{esc(team_label)} Competitor Activities &amp; Paid Assets</div>
   </div>
   <div class="dash-meta">
     Period <b>{esc(period_txt)}</b><br>
-    Project <b>{esc(selected_project or 'All')}</b> · Reps <b>{len(selected_reps) or 'All'}</b> · Outlets <b>{len(selected_outlets) or 'All'}</b>
+    Team <b>{esc(team_label)}</b> · Reps <b>{len(selected_reps) or 'All'}</b> · Outlets <b>{len(selected_outlets) or 'All'}</b>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1546,15 +1584,17 @@ with tab_overview:
         else:
             st.info("No paid assets for the selected filters.")
     with c4:
-        mix = pd.concat([
-            paid_unique.groupby("Project").size().rename("Paid Assets"),
-            unpaid_unique.groupby("Project").size().rename("Unpaid Assets"),
-            comp_df.assign(k=comp_df["Type Outlet Name"].map(outlet_key)).groupby("Select Your Project")["k"].nunique().rename("Competitor Activities"),
-        ], axis=1).fillna(0).astype(int).rename_axis("Project").reset_index() \
-            .melt(id_vars="Project", var_name="Measure", value_name="Count")
+        comp_chain = comp_df.assign(k=comp_df["Type Outlet Name"].map(outlet_key), Chain=comp_df["Type Outlet Name"].map(chain_of))
+        wide = pd.concat([
+            paid_unique.groupby("Chain").size().rename("Paid Assets") if len(paid_unique) else pd.Series(dtype=int, name="Paid Assets"),
+            unpaid_unique.groupby("Chain").size().rename("Unpaid Assets") if len(unpaid_unique) else pd.Series(dtype=int, name="Unpaid Assets"),
+            comp_chain.groupby("Chain")["k"].nunique().rename("Competitor Activities"),
+        ], axis=1).fillna(0).astype(int)
+        wide = wide.loc[wide.sum(axis=1).sort_values(ascending=False).index[:8]]
+        mix = wide.rename_axis("Chain").reset_index().melt(id_vars="Chain", var_name="Measure", value_name="Count")
         if not mix.empty:
-            fig = px.bar(mix, x="Project", y="Count", color="Measure", barmode="group", text="Count",
-                         color_discrete_map=ACTIVITY_COLORS, title="Unique assets and competitor outlets by project")
+            fig = px.bar(mix, x="Chain", y="Count", color="Measure", barmode="group", text="Count",
+                         color_discrete_map=ACTIVITY_COLORS, title="Unique assets and competitor outlets by chain")
             fig.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(style_fig(fig, 360), use_container_width=True, config=PLOT_CONFIG)
 
@@ -1690,8 +1730,8 @@ with tab_gallery:
 with tab_export:
     st.markdown("<div class='section-title'>Report exports</div><div class='section-sub'>Exports use the filters currently applied in the sidebar</div>", unsafe_allow_html=True)
     export_ctx = {
-        "meta_line": f"Chandaria · Smollan Kenya   |   Period: {period_txt}   |   Project: {selected_project or 'All'}   |   Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
-        "period_txt": period_txt, "project_label": selected_project if selected_project and selected_project != "All" else "All Projects",
+        "meta_line": f"Chandaria · Smollan Kenya   |   Team: {team_label}   |   Period: {period_txt}   |   Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
+        "period_txt": period_txt, "project_label": team_label, "team_label": team_label,
         "priced": priced_promos, "promo": promo_df, "paid_unique": paid_unique, "unpaid_unique": unpaid_unique,
         "paid_df": paid_df, "unpaid_df": unpaid_df, "comp_df": comp_df, "comp_outlets": comp_outlets,
         "paid_photos": paid_photos, "unpaid_photos": unpaid_photos, "raw_df": filtered_df,
@@ -1703,7 +1743,7 @@ with tab_export:
         if st.button("Build Excel report", key="excel_btn", use_container_width=True):
             with st.spinner("Downloading photos and building the report…"):
                 excel_bytes = generate_excel_report(export_ctx)
-            st.download_button("Download .xlsx", data=excel_bytes, file_name=f"Competitor_And_Paid_Assets_Report_{stamp}.xlsx",
+            st.download_button("Download .xlsx", data=excel_bytes, file_name=f"{team_label}_Competitor_And_Paid_Assets_Report_{stamp}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="excel_dl", use_container_width=True, type="primary")
     with e2:
@@ -1714,6 +1754,6 @@ with tab_export:
         if st.button("Build PowerPoint deck", key="ppt_btn", use_container_width=True, disabled=paid_unique.empty):
             with st.spinner("Downloading photos and building the deck…"):
                 ppt_bytes = generate_pptx_report(export_ctx)
-            st.download_button("Download .pptx", data=ppt_bytes, file_name=f"Chandaria_Paid_Assets_Review_{stamp}.pptx",
+            st.download_button("Download .pptx", data=ppt_bytes, file_name=f"Chandaria_{team_label}_Paid_Assets_Review_{stamp}.pptx",
                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                key="ppt_dl", use_container_width=True, type="primary")
