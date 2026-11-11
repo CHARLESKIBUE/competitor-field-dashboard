@@ -1204,6 +1204,19 @@ def load_data():
 
     df = pd.concat(frames, ignore_index=True)
     df["Select Your Project"] = df["Select Your Project"].replace("", "Unassigned")
+    # Team comes from the rep, not the project picked on each entry: a rep belongs to the team
+    # they submit under most often, so a wrong project pick doesn't move them into the other report.
+    df["Project Selected"] = df["Select Your Project"]
+    known = df[df["Select Your Project"].isin(["CORE", "IB"]) & (df["Select Your Name"] != "")]
+    def _main_team(projects):
+        counts = projects.value_counts()
+        if len(counts) > 1 and counts.iloc[0] == counts.iloc[1]:
+            return None  # evenly split: keep the project picked on each entry
+        return counts.index[0]
+
+    rep_team = known.groupby("Select Your Name")["Select Your Project"].agg(_main_team)
+    team_of_rep = df["Select Your Name"].map(rep_team)
+    df["Select Your Project"] = team_of_rep.where(team_of_rep.notna(), df["Select Your Project"])
     df["Select Your Name"] = df["Select Your Name"].replace("", "UNKNOWN REP")
     df["Type Outlet Name"] = df["Type Outlet Name"].replace("", "Unknown Outlet")
 
